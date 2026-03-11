@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nova Universe</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #060606; color: #fff; font-family: 'Syne', sans-serif; overflow: hidden; width: 100vw; height: 100vh; }
+    #app { position: relative; width: 100vw; height: 100vh; }
+    #game-container canvas { display: block; position: absolute; top: 0; left: 0; }
+
+    /* AUTH */
+    #auth-screen { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #060606; z-index: 100; }
+    #auth-screen .logo { font-family: 'Syne', sans-serif; font-size: 40px; font-weight: 800; background: linear-gradient(135deg, #00ff88, #00c8ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; }
+    #auth-screen .sub { font-family: 'Space Mono', monospace; font-size: 11px; color: #555; text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 48px; }
+    #auth-screen input { background: #0d0d0d; border: 1px solid #1a1a1a; color: #fff; font-family: 'Space Mono', monospace; font-size: 12px; padding: 12px 16px; border-radius: 6px; width: 360px; outline: none; margin-bottom: 12px; }
+    #auth-screen input:focus { border-color: #333; }
+    #auth-screen button { background: #00ff8818; border: 1px solid #00ff8840; color: #00ff88; font-family: 'Space Mono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; padding: 12px 32px; border-radius: 6px; cursor: pointer; width: 360px; transition: opacity 0.15s; }
+    #auth-screen button:hover { opacity: 0.8; }
+    #auth-screen .error { font-family: 'Space Mono', monospace; font-size: 10px; color: #ff4444; margin-top: 8px; }
+
+    /* HUD */
+    #hud { position: absolute; inset: 0; pointer-events: none; z-index: 10; display: none; }
+    #hud.visible { display: block; }
+    #hud-topbar { position: absolute; top: 0; left: 0; right: 0; height: 48px; background: rgba(6,6,6,0.88); border-bottom: 1px solid #111; display: flex; align-items: center; padding: 0 20px; gap: 24px; backdrop-filter: blur(8px); }
+    #hud-topbar .logo { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 15px; background: linear-gradient(135deg, #00ff88, #00c8ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .hud-stat { display: flex; flex-direction: column; gap: 1px; }
+    .hud-stat .label { font-family: 'Space Mono', monospace; font-size: 8px; color: #555; text-transform: uppercase; letter-spacing: 0.1em; }
+    .hud-stat .value { font-family: 'Space Mono', monospace; font-size: 11px; color: #fff; }
+    .live-dot { width: 6px; height: 6px; border-radius: 50%; background: #00ff88; animation: pulse 1.5s ease-in-out infinite; margin-left: auto; }
+    @keyframes pulse { 0%,100%{opacity:1}50%{opacity:0.3} }
+    #hud-wallet { font-family: 'Space Mono', monospace; font-size: 10px; color: #555; pointer-events: all; cursor: pointer; }
+    .novaverse-link { font-family: 'Space Mono', monospace; font-size: 10px; color: #00c8ff; text-decoration: none; text-transform: uppercase; letter-spacing: 0.08em; pointer-events: all; }
+
+    /* FEED */
+    #event-feed { position: absolute; bottom: 20px; left: 20px; width: 340px; max-height: 220px; overflow: hidden; display: flex; flex-direction: column-reverse; gap: 4px; }
+    .feed-item { background: rgba(10,10,10,0.92); border: 1px solid #1a1a1a; border-radius: 6px; padding: 8px 12px; display: flex; align-items: center; gap: 8px; animation: slideIn 0.3s ease; pointer-events: none; }
+    @keyframes slideIn { from{opacity:0;transform:translateX(-12px)} to{opacity:1;transform:translateX(0)} }
+    .feed-item .icon { font-size: 14px; flex-shrink: 0; }
+    .feed-item .text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+    .feed-item .agent-name { font-family: 'Space Mono', monospace; font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .feed-item .msg { font-family: 'Syne', sans-serif; font-size: 11px; color: #bbb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .feed-item .time { font-family: 'Space Mono', monospace; font-size: 9px; color: #333; margin-left: auto; flex-shrink: 0; }
+
+    /* AGENT TOOLTIP */
+    #agent-tooltip { position: absolute; bottom: 20px; right: 20px; width: 220px; background: rgba(10,10,10,0.96); border: 1px solid #1a1a1a; border-radius: 8px; padding: 16px; display: none; pointer-events: none; }
+    #agent-tooltip.visible { display: block; }
+    #agent-tooltip .name { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 13px; color: #fff; }
+    #agent-tooltip .role { font-family: 'Space Mono', monospace; font-size: 9px; color: #555; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; margin-bottom: 10px; }
+    #agent-tooltip .stat-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+    #agent-tooltip .stat-label { font-family: 'Space Mono', monospace; font-size: 9px; color: #555; }
+    #agent-tooltip .stat-val { font-family: 'Space Mono', monospace; font-size: 9px; color: #bbb; }
+
+    /* ZONE LABEL */
+    #zone-label { position: absolute; background: rgba(10,10,10,0.9); border: 1px solid #222; border-radius: 4px; padding: 4px 10px; font-family: 'Space Mono', monospace; font-size: 9px; color: #888; text-transform: uppercase; letter-spacing: 0.1em; display: none; pointer-events: none; }
+
+    /* CONTROLS HINT */
+    #controls-hint { position: absolute; top: 64px; right: 16px; font-family: 'Space Mono', monospace; font-size: 9px; color: #2a2a2a; line-height: 1.8; text-align: right; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="auth-screen">
+      <div class="logo">Nova Universe</div>
+      <div class="sub">Agent World Explorer</div>
+      <input id="wallet-input" type="text" placeholder="Wallet address (0x... or Solana)" />
+      <button id="sign-in-btn">Enter the Universe</button>
+      <div id="auth-error" class="error"></div>
+    </div>
+
+    <div id="game-container"></div>
+
+    <div id="hud">
+      <div id="hud-topbar">
+        <div class="logo">Nova Universe</div>
+        <div style="color:#222">·</div>
+        <div class="hud-stat"><div class="label">Portfolio</div><div class="value" id="stat-portfolio">$0.00</div></div>
+        <div class="hud-stat"><div class="label">Agents</div><div class="value" id="stat-agents">0</div></div>
+        <div class="hud-stat"><div class="label">Txs Today</div><div class="value" id="stat-txs">0</div></div>
+        <div class="hud-stat"><div class="label">NOVA</div><div class="value" id="stat-nova" style="color:#c084fc">0</div></div>
+        <div class="live-dot"></div>
+        <div id="hud-wallet"></div>
+        <a href="https://grumpy-nova-agent-flow.base44.app" target="_blank" class="novaverse-link">← Dashboard</a>
+      </div>
+      <div id="event-feed"></div>
+      <div id="agent-tooltip"></div>
+      <div id="zone-label"></div>
+      <div id="controls-hint">WASD / Drag — Pan<br/>Scroll — Zoom<br/>Click Agent — Info</div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
