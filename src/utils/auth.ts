@@ -17,7 +17,7 @@ export function clearAuth() {
 }
 
 /** Full auth flow: fetch nonce → sign → verify → store JWT */
-export async function authenticate(address: string): Promise<string> {
+export async function authenticate(address: string, walletType: 'evm' | 'solana' = 'evm'): Promise<string> {
   // 1. Get nonce message
   const nonceRes = await fetch(`${API_BASE}/auth/nonce`, {
     method: 'POST',
@@ -28,31 +28,42 @@ export async function authenticate(address: string): Promise<string> {
   if (!nonceRes.ok) throw new Error('Failed to get nonce');
   const { message } = await nonceRes.json();
 
-  // 2. Sign with MetaMask / window.ethereum if available
+  // 2. Sign with the appropriate wallet
   let signature: string;
 
-  if (typeof (window as any).ethereum !== 'undefined') {
+  if (walletType === 'solana') {
+    const sol = (window as any).phantom?.solana ?? (window as any).solana;
+    if (!sol) throw new Error('Solana wallet not found');
     try {
-      const eth = (window as any).ethereum;
+      const encoded = new TextEncoder().encode(message);
+      const { signature: sigBytes } = await sol.signMessage(encoded, 'utf8');
+      // Convert Uint8Array to hex string
+      signature = '0x' + Array.from(sigBytes as Uint8Array)
+        .map((b: number) => b.toString(16).padStart(2, '0'))
+        .join('');
+    } catch {
+      throw new Error('Solana signing rejected');
+    }
+  } else {
+    // EVM (MetaMask, Rabby, etc.)
+    const eth = (window as any).ethereum;
+    if (!eth) throw new Error('EVM wallet not found');
+    try {
       await eth.request({ method: 'eth_requestAccounts' });
       signature = await eth.request({
         method: 'personal_sign',
         params: [message, address],
       });
     } catch {
-      // Fall through to mock signature for dev
-      signature = '0x' + '0'.repeat(130);
+      throw new Error('EVM signing rejected');
     }
-  } else {
-    // Dev mode: mock signature (backend must accept in dev)
-    signature = '0x' + '0'.repeat(130);
   }
 
-  // 3. Verify
+  // 3. Verify — backend requires the original nonce message back
   const verifyRes = await fetch(`${API_BASE}/auth/verify`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address, signature }),
+    body: JSON.stringify({ address, message, signature, walletType }),
   });
 
   if (!verifyRes.ok) throw new Error('Signature verification failed');

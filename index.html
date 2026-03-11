@@ -16,13 +16,13 @@
     #auth-screen { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #060606; z-index: 100; }
     #auth-screen .logo { font-family: 'Syne', sans-serif; font-size: 40px; font-weight: 800; background: linear-gradient(135deg, #00ff88, #00c8ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; }
     #auth-screen .sub { font-family: 'Space Mono', monospace; font-size: 11px; color: #555; text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 48px; }
-    #auth-screen input { background: #0d0d0d; border: 1px solid #1a1a1a; color: #fff; font-family: 'Space Mono', monospace; font-size: 12px; padding: 12px 16px; border-radius: 6px; width: 360px; outline: none; margin-bottom: 12px; }
-    #auth-screen input:focus { border-color: #333; }
-    #auth-screen button { background: #00ff8818; border: 1px solid #00ff8840; color: #00ff88; font-family: 'Space Mono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; padding: 12px 32px; border-radius: 6px; cursor: pointer; width: 360px; transition: opacity 0.15s; }
-    #auth-screen button:hover { opacity: 0.8; }
-    #auth-screen .or-divider { font-family: 'Space Mono', monospace; font-size: 9px; color: #333; margin: 8px 0; text-transform: uppercase; letter-spacing: 0.15em; }
-    #wallet-connect-btn { background: #00c8ff12 !important; border: 1px solid #00c8ff40 !important; color: #00c8ff !important; }
-    #auth-screen .error { font-family: 'Space Mono', monospace; font-size: 10px; color: #ff4444; margin-top: 8px; }
+    #auth-screen button { font-family: 'Space Mono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; padding: 14px 32px; border-radius: 6px; cursor: pointer; width: 360px; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 10px; }
+    #auth-screen button:hover { opacity: 0.85; transform: translateY(-1px); }
+    #auth-screen button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+    #evm-connect-btn { background: #ff950012; border: 1px solid #ff950040; color: #ff9500; }
+    #sol-connect-btn { background: #9945ff12; border: 1px solid #9945ff40; color: #9945ff; margin-top: 10px; }
+    .wallet-divider { font-family: 'Space Mono', monospace; font-size: 8px; color: #222; margin: 16px 0 8px; text-transform: uppercase; letter-spacing: 0.15em; }
+    #auth-screen .error { font-family: 'Space Mono', monospace; font-size: 10px; color: #ff4444; margin-top: 12px; }
 
     /* HUD */
     #hud { position: absolute; inset: 0; pointer-events: none; z-index: 10; display: none; }
@@ -77,10 +77,8 @@
     <div id="auth-screen">
       <div class="logo">Nova Universe</div>
       <div class="sub">Agent World Explorer</div>
-      <button id="wallet-connect-btn">🦊 Connect Wallet</button>
-      <div class="or-divider">— or enter address —</div>
-      <input id="wallet-input" type="text" placeholder="Wallet address (0x... or Solana)" />
-      <button id="sign-in-btn">Enter the Universe</button>
+      <button id="evm-connect-btn">🦊 Connect EVM Wallet</button>
+      <button id="sol-connect-btn">👻 Connect Solana Wallet</button>
       <div id="auth-error" class="error"></div>
     </div>
 

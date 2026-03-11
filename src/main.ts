@@ -7,54 +7,70 @@ import { WORLD_WIDTH, WORLD_HEIGHT, ACTION_ZONE_MAP, ACTION_META } from './confi
 
 // ─── AUTH SCREEN ──────────────────────────────────────────────────────────────
 
-const walletInput  = document.getElementById('wallet-input')  as HTMLInputElement;
-const signInBtn    = document.getElementById('sign-in-btn')   as HTMLButtonElement;
-const walletBtn    = document.getElementById('wallet-connect-btn') as HTMLButtonElement | null;
-const authError    = document.getElementById('auth-error')    as HTMLElement;
-const authScreen   = document.getElementById('auth-screen')   as HTMLElement;
+const evmBtn     = document.getElementById('evm-connect-btn') as HTMLButtonElement;
+const solBtn     = document.getElementById('sol-connect-btn') as HTMLButtonElement;
+const authError  = document.getElementById('auth-error')      as HTMLElement;
+const authScreen = document.getElementById('auth-screen')     as HTMLElement;
 
-// Manual address sign-in
-signInBtn.addEventListener('click', async () => {
-  const address = walletInput.value.trim();
-  if (!address) { authError.textContent = 'Enter a wallet address'; return; }
-  await doAuth(address);
-});
-
-// Wallet connect button (MetaMask / window.ethereum)
-walletBtn?.addEventListener('click', async () => {
+// ── EVM Wallet (MetaMask, Rabby, etc.) ──────────────────────────────────────
+evmBtn.addEventListener('click', async () => {
   const eth = (window as any).ethereum;
   if (!eth) {
-    authError.textContent = 'No wallet detected. Install MetaMask or enter an address.';
+    authError.textContent = 'No EVM wallet detected. Install MetaMask.';
     return;
   }
   try {
-    walletBtn.textContent = 'Connecting…';
-    walletBtn.disabled = true;
+    setBothDisabled(true, '🦊 Connecting…', solBtn.textContent!);
     const accounts: string[] = await eth.request({ method: 'eth_requestAccounts' });
     if (accounts.length === 0) throw new Error('No accounts returned');
-    await doAuth(accounts[0]);
+    await doAuth(accounts[0], 'evm');
   } catch (e: any) {
-    authError.textContent = e.message ?? 'Wallet connection failed';
-    walletBtn.textContent = '🦊 Connect Wallet';
-    walletBtn.disabled = false;
+    authError.textContent = e.message ?? 'EVM wallet connection failed';
+    resetButtons();
   }
 });
 
-async function doAuth(address: string) {
-  signInBtn.textContent = 'Signing in…';
-  signInBtn.disabled = true;
-  if (walletBtn) { walletBtn.disabled = true; }
-  authError.textContent = '';
-
+// ── Solana Wallet (Phantom, Solflare, etc.) ─────────────────────────────────
+solBtn.addEventListener('click', async () => {
+  const sol = (window as any).phantom?.solana ?? (window as any).solana;
+  if (!sol) {
+    authError.textContent = 'No Solana wallet detected. Install Phantom.';
+    return;
+  }
   try {
-    await authenticate(address);
+    setBothDisabled(true, evmBtn.textContent!, '👻 Connecting…');
+    const resp = await sol.connect();
+    const address = resp.publicKey.toString();
+    await doAuth(address, 'solana');
+  } catch (e: any) {
+    authError.textContent = e.message ?? 'Solana wallet connection failed';
+    resetButtons();
+  }
+});
+
+function setBothDisabled(disabled: boolean, evmText: string, solText: string) {
+  evmBtn.disabled = disabled;
+  solBtn.disabled = disabled;
+  evmBtn.textContent = evmText;
+  solBtn.textContent = solText;
+  authError.textContent = '';
+}
+
+function resetButtons() {
+  evmBtn.textContent = '🦊 Connect EVM Wallet';
+  solBtn.textContent = '👻 Connect Solana Wallet';
+  evmBtn.disabled = false;
+  solBtn.disabled = false;
+}
+
+async function doAuth(address: string, walletType: 'evm' | 'solana') {
+  try {
+    await authenticate(address, walletType);
     authScreen.style.display = 'none';
     startUniverse();
   } catch (e: any) {
     authError.textContent = e.message ?? 'Authentication failed';
-    signInBtn.textContent = 'Enter the Universe';
-    signInBtn.disabled = false;
-    if (walletBtn) { walletBtn.textContent = '🦊 Connect Wallet'; walletBtn.disabled = false; }
+    resetButtons();
   }
 }
 
