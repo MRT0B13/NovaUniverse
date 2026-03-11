@@ -16,15 +16,21 @@ const WORLD_CZ      = (WORLD_HEIGHT * SCALE) / 2;  // ~9
 
 // ── Zone → building assignment ────────────────────────────────────────────────
 const ZONE_BUILDINGS: Record<string, { dir: string; files: string[]; count: number }> = {
-  trading_floor:  { dir: 'commercial',  files: ['building-skyscraper-a','building-skyscraper-b','building-c'], count: 3 },
-  intel_hub:      { dir: 'commercial',  files: ['building-e','building-f','building-g'], count: 2 },
-  watchtower:     { dir: 'industrial',  files: ['building-a','building-b','chimney-large'], count: 2 },
-  command_center: { dir: 'commercial',  files: ['building-skyscraper-c','building-skyscraper-d'], count: 2 },
-  launchpad:      { dir: 'industrial',  files: ['building-h','building-i','building-j'], count: 2 },
-  agora:          { dir: 'suburban',    files: ['building-type-a','building-type-b','tree-large'], count: 3 },
-  orca_pool:      { dir: 'commercial',  files: ['low-detail-building-a','low-detail-building-b'], count: 2 },
-  burn_furnace:   { dir: 'industrial',  files: ['chimney-large','chimney-medium','detail-tank'], count: 3 },
+  trading_floor:  { dir: 'commercial',  files: ['building-skyscraper-a','building-skyscraper-b','building-skyscraper-c','building-c','building-d'], count: 5 },
+  intel_hub:      { dir: 'commercial',  files: ['building-e','building-f','building-g','building-h','low-detail-building-c'], count: 4 },
+  watchtower:     { dir: 'industrial',  files: ['building-a','building-b','building-c','chimney-large','chimney-medium'], count: 4 },
+  command_center: { dir: 'commercial',  files: ['building-skyscraper-d','building-skyscraper-e','building-a','building-b'], count: 4 },
+  launchpad:      { dir: 'industrial',  files: ['building-h','building-i','building-j','building-k','detail-tank'], count: 4 },
+  agora:          { dir: 'suburban',    files: ['building-type-a','building-type-b','building-type-c','building-type-d','tree-large','tree-small'], count: 5 },
+  orca_pool:      { dir: 'commercial',  files: ['low-detail-building-a','low-detail-building-b','low-detail-building-d','low-detail-building-e'], count: 4 },
+  burn_furnace:   { dir: 'industrial',  files: ['chimney-large','chimney-small','chimney-basic','detail-tank','building-d','building-e'], count: 5 },
 };
+
+// ── Road tile models (laid along road paths) ──────────────────────────────────
+const ROAD_TILES = [
+  'road-straight',  'road-straight-sidewalk', 'road-straight-line',
+  'road-crossroad', 'road-crossing',
+];
 
 // ── Agent → character model + tint colour ─────────────────────────────────────
 export const AGENT_MODELS: Record<string, { model: string; color: number; cssColor: string }> = {
@@ -299,36 +305,47 @@ export class World3D {
     this.threeScene.add(sprite);
   }
 
+  // ── Colormap cache ─────────────────────────────────────────────────────────
+  private colormaps = new Map<string, THREE.Texture>();
+
+  private async getColormap(category: string): Promise<THREE.Texture | null> {
+    if (this.colormaps.has(category)) return this.colormaps.get(category)!;
+    try {
+      const tex = await this.texLoader.loadAsync('/kenney/textures/' + category + '_colormap.png');
+      tex.flipY = false;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      this.colormaps.set(category, tex);
+      return tex;
+    } catch {
+      return null;
+    }
+  }
+
   // ── Asset loading ──────────────────────────────────────────────────────────
 
   async loadAssets(onProgress?: (pct: number) => void): Promise<void> {
     let loaded = 0;
-    const totalSteps = Object.keys(ZONE_BUILDINGS).length + 5; // zones + vehicles
+    const totalSteps = Object.keys(ZONE_BUILDINGS).length + 6; // zones + vehicles + roads
     const bump = () => { loaded++; onProgress?.(Math.min(100, Math.round((loaded / totalSteps) * 100))); };
 
-    // Try to load shared colormap
-    let colormap: THREE.Texture | null = null;
-    try {
-      colormap = await this.texLoader.loadAsync('/kenney/textures/colormap.png');
-      colormap.flipY = false;
-    } catch {
-      console.warn('[World3D] colormap.png not found — buildings will use fallback colours');
-    }
+    // Load buildings per zone (each zone uses its pack's colormap)
+    await this.loadZoneBuildings(bump);
 
-    // Load buildings per zone
-    await this.loadZoneBuildings(colormap, bump);
+    // Load road tile models
+    await this.loadRoadTiles(bump);
 
     // Load vehicles
-    await this.loadVehicles(colormap, bump);
+    await this.loadVehicles(bump);
 
     this.sceneReady = true;
   }
 
-  private async loadZoneBuildings(colormap: THREE.Texture | null, bump: () => void) {
+  private async loadZoneBuildings(bump: () => void) {
     for (const [zoneKey, cfg] of Object.entries(ZONE_BUILDINGS)) {
       const zone = ZONES[zoneKey];
       if (!zone) { bump(); continue; }
 
+      const colormap = await this.getColormap(cfg.dir);
       const cx = zone.x * SCALE - WORLD_CX;
       const cz = zone.y * SCALE - WORLD_CZ;
       const hw = (zone.w * SCALE) / 2;
@@ -346,13 +363,15 @@ export class World3D {
           const gltf = await this.loader.loadAsync(path);
           const model = gltf.scene;
 
-          // Apply colormap or fallback material
+          // Apply the pack's colormap texture
           model.traverse(child => {
             if (child instanceof THREE.Mesh) {
               child.castShadow = true;
               child.receiveShadow = true;
               if (colormap) {
-                child.material = new THREE.MeshLambertMaterial({ map: colormap });
+                const mat = child.material as THREE.MeshStandardMaterial;
+                if (!mat.map) mat.map = colormap;
+                mat.needsUpdate = true;
               }
             }
           });
@@ -382,13 +401,55 @@ export class World3D {
     this.threeScene.add(mesh);
   }
 
-  private async loadVehicles(colormap: THREE.Texture | null, bump: () => void) {
-    const carModels = ['sedan', 'taxi', 'police', 'van', 'suv'];
+  private async loadRoadTiles(bump: () => void) {
+    const colormap = await this.getColormap('roads');
+
+    // Place road tiles along the main roads
+    const roadPositions: Array<{ x: number; z: number; ry: number; model: string }> = [];
+
+    // Horizontal road segments
+    for (let x = -12; x <= 12; x += 2) {
+      roadPositions.push({ x, z: 0, ry: 0, model: x === 0 ? 'road-crossroad' : 'road-straight' });
+    }
+    // Vertical road segments
+    for (let z = -12; z <= 12; z += 2) {
+      if (z === 0) continue; // already have crossroad at origin
+      roadPositions.push({ x: 0, z, ry: Math.PI / 2, model: 'road-straight' });
+    }
+
+    for (const rp of roadPositions) {
+      try {
+        const gltf = await this.loader.loadAsync('/kenney/models/roads/' + rp.model + '.glb');
+        const model = gltf.scene;
+        model.traverse(child => {
+          if (child instanceof THREE.Mesh) {
+            child.receiveShadow = true;
+            if (colormap) {
+              const mat = child.material as THREE.MeshStandardMaterial;
+              if (!mat.map) mat.map = colormap;
+              mat.needsUpdate = true;
+            }
+          }
+        });
+        model.position.set(rp.x, 0.005, rp.z);
+        model.rotation.y = rp.ry;
+        model.scale.setScalar(0.01);
+        this.threeScene.add(model);
+      } catch {
+        // Road tile not found — the procedural roads are still visible
+      }
+    }
+    bump();
+  }
+
+  private async loadVehicles(bump: () => void) {
+    const carModels = ['sedan', 'taxi', 'police', 'van', 'suv', 'ambulance', 'truck'];
+    const colormap = await this.getColormap('cars');
     const path = ROAD_PATHS[0]; // outer loop
 
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 6; i++) {
       const modelName = carModels[i % carModels.length];
-      const startIdx = Math.floor((i / 4) * path.length);
+      const startIdx = Math.floor((i / 6) * path.length);
 
       try {
         const gltf = await this.loader.loadAsync('/kenney/models/cars/' + modelName + '.glb');
@@ -398,7 +459,9 @@ export class World3D {
           if (child instanceof THREE.Mesh) {
             child.castShadow = true;
             if (colormap) {
-              child.material = new THREE.MeshLambertMaterial({ map: colormap });
+              const mat = child.material as THREE.MeshStandardMaterial;
+              if (!mat.map) mat.map = colormap;
+              mat.needsUpdate = true;
             }
           }
         });
