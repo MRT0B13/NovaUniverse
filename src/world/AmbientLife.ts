@@ -1,49 +1,26 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { STREETS_X, STREETS_Z, ROAD_HW, SIDEWALK_W } from './CityPopulator';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const GROUND_Y = 0;
-const NPC_SPEED = 0.8;           // units/sec
-const CAR_SPEED  = 2.5;          // units/sec
-const WANDER_RADIUS = 26;        // NPCs stay within this radius
+const GROUND_Y  = 0;
+const NPC_SPEED = 1.2;
+const CAR_SPEED = 3.5;
 
-// ── NPC character models (ones NOT used by agents) ────────────────────────────
+// Character models NOT used by named agents
 const NPC_CHARS = [
-  'character-d', 'character-f', 'character-h', 'character-j',
-  'character-l', 'character-m', 'character-n', 'character-o',
-  'character-p', 'character-q', 'character-r',
+  'character-d','character-f','character-h','character-j',
+  'character-l','character-m','character-n','character-o',
+  'character-p','character-q','character-r',
 ];
 
-// ── Ambient car models ────────────────────────────────────────────────────────
+// Ambient car models
 const AMBIENT_CARS = [
-  'delivery', 'firetruck', 'garbage-truck', 'hatchback-sports',
-  'race', 'sedan-sports', 'tractor', 'truck-flat',
+  'delivery','firetruck','garbage-truck','hatchback-sports',
+  'race','sedan-sports','tractor','truck-flat',
+  'sedan','taxi','police','van','suv','ambulance',
 ];
 
-// ── Road paths for ambient traffic ────────────────────────────────────────────
-const TRAFFIC_ROUTES: THREE.Vector3[][] = [
-  // Horizontal road (full span)
-  [new THREE.Vector3(-28, GROUND_Y, -0.6), new THREE.Vector3(28, GROUND_Y, -0.6)],
-  [new THREE.Vector3(28, GROUND_Y, 0.6), new THREE.Vector3(-28, GROUND_Y, 0.6)],
-  // Vertical road (full span)
-  [new THREE.Vector3(-0.6, GROUND_Y, -28), new THREE.Vector3(-0.6, GROUND_Y, 28)],
-  [new THREE.Vector3(0.6, GROUND_Y, 28), new THREE.Vector3(0.6, GROUND_Y, -28)],
-];
-
-// ── Sidewalk paths for NPCs ──────────────────────────────────────────────────
-const SIDEWALK_PATHS: THREE.Vector3[][] = [
-  // Parallel to horizontal road
-  [new THREE.Vector3(-25, GROUND_Y, -2.0), new THREE.Vector3(25, GROUND_Y, -2.0)],
-  [new THREE.Vector3(25, GROUND_Y, 2.0), new THREE.Vector3(-25, GROUND_Y, 2.0)],
-  // Parallel to vertical road
-  [new THREE.Vector3(-2.0, GROUND_Y, -25), new THREE.Vector3(-2.0, GROUND_Y, 25)],
-  [new THREE.Vector3(2.0, GROUND_Y, 25), new THREE.Vector3(2.0, GROUND_Y, -25)],
-  // Diagonal cross paths
-  [new THREE.Vector3(-15, GROUND_Y, -15), new THREE.Vector3(15, GROUND_Y, 15)],
-  [new THREE.Vector3(15, GROUND_Y, -15), new THREE.Vector3(-15, GROUND_Y, 15)],
-];
-
-// ── Helper: seeded random ─────────────────────────────────────────────────────
 function mulberry32(seed: number) {
   return () => {
     seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
@@ -53,27 +30,45 @@ function mulberry32(seed: number) {
   };
 }
 
-// ── NPC entity ────────────────────────────────────────────────────────────────
-interface NPCEntity {
-  model: THREE.Object3D;
-  target: THREE.Vector3;
-  speed: number;
-  pathIndex: number;        // which sidewalk path
-  pathProgress: number;     // 0..1 along current segment
-  direction: 1 | -1;        // forward or backward on path
-  idleTimer: number;        // seconds remaining in idle pause
+// ── Build sidewalk paths from the grid ────────────────────────────────────────
+function buildSidewalkPaths(): THREE.Vector3[][] {
+  const paths: THREE.Vector3[][] = [];
+  const yy = GROUND_Y;
+  const sw = ROAD_HW + SIDEWALK_W / 2 + 0.1;
+
+  // Along each horizontal road, walk on both sidewalks
+  for (const z of STREETS_Z) {
+    paths.push([new THREE.Vector3(-28, yy, z - sw), new THREE.Vector3(28, yy, z - sw)]);
+    paths.push([new THREE.Vector3(28, yy, z + sw), new THREE.Vector3(-28, yy, z + sw)]);
+  }
+  // Along each vertical road
+  for (const x of STREETS_X) {
+    paths.push([new THREE.Vector3(x - sw, yy, -28), new THREE.Vector3(x - sw, yy, 28)]);
+    paths.push([new THREE.Vector3(x + sw, yy, 28), new THREE.Vector3(x + sw, yy, -28)]);
+  }
+  return paths;
 }
 
-// ── Traffic entity ────────────────────────────────────────────────────────────
+// ── Entities ──────────────────────────────────────────────────────────────────
+interface NPCEntity {
+  model: THREE.Object3D;
+  speed: number;
+  pathIndex: number;
+  pathProgress: number;
+  direction: 1 | -1;
+  idleTimer: number;
+  walkPhase: number;
+}
+
 interface TrafficEntity {
   model: THREE.Object3D;
-  routeIndex: number;
-  progress: number;         // 0..1 along route
+  from: THREE.Vector3;
+  to: THREE.Vector3;
+  progress: number;
   speed: number;
   respawnDelay: number;
 }
 
-// ── Smoke particle system ─────────────────────────────────────────────────────
 interface SmokeColumn {
   particles: THREE.Points;
   velocities: Float32Array;
@@ -82,7 +77,7 @@ interface SmokeColumn {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
-//  AmbientLife — NPCs, traffic, smoke, ambient atmosphere
+//  AmbientLife — NPCs on every sidewalk, cars on every road, chimney smoke
 // ════════════════════════════════════════════════════════════════════════════════
 export class AmbientLife {
   private scene: THREE.Scene;
@@ -93,8 +88,8 @@ export class AmbientLife {
   private npcs: NPCEntity[] = [];
   private traffic: TrafficEntity[] = [];
   private smokeCols: SmokeColumn[] = [];
+  private sidewalkPaths: THREE.Vector3[][];
 
-  // GLB cache
   private cache = new Map<string, THREE.Object3D>();
 
   constructor(scene: THREE.Scene, loader: GLTFLoader, texLoader: THREE.TextureLoader, seed = 137) {
@@ -102,24 +97,19 @@ export class AmbientLife {
     this.loader = loader;
     this.texLoader = texLoader;
     this.rng = mulberry32(seed);
+    this.sidewalkPaths = buildSidewalkPaths();
   }
 
-  // ── GLB loader with cache ──────────────────────────────────────────────────
   private async loadModel(dir: string, file: string, colormap?: THREE.Texture | null): Promise<THREE.Object3D | null> {
     const key = dir + '/' + file;
     if (this.cache.has(key)) return this.cache.get(key)!.clone();
     try {
       const gltf = await this.loader.loadAsync('/kenney/models/' + key + '.glb');
       const model = gltf.scene;
-      model.traverse(child => {
-        if (child instanceof THREE.Mesh) {
-          child.castShadow = true;
-          child.receiveShadow = true;
-          if (colormap) {
-            const mat = child.material as THREE.MeshStandardMaterial;
-            if (!mat.map) mat.map = colormap;
-            mat.needsUpdate = true;
-          }
+      model.traverse(c => {
+        if (c instanceof THREE.Mesh) {
+          c.castShadow = true; c.receiveShadow = true;
+          if (colormap) { const m = c.material as THREE.MeshStandardMaterial; if (!m.map) m.map = colormap; m.needsUpdate = true; }
         }
       });
       this.cache.set(key, model);
@@ -127,20 +117,16 @@ export class AmbientLife {
     } catch { return null; }
   }
 
-  // ── Spawn all ambient life ─────────────────────────────────────────────────
-  async spawn(): Promise<void> {
-    console.log('[AmbientLife] Spawning NPCs and traffic…');
-
+  // ── Spawn everything ───────────────────────────────────────────────────────
+  async spawn(roadSegments: Array<{ from: THREE.Vector3; to: THREE.Vector3 }>): Promise<void> {
+    console.log('[AmbientLife] Spawning…');
     await this.spawnNPCs();
-    await this.spawnTraffic();
-    this.createSmoke([]);  // will be called again with chimney positions
-
-    console.log('[AmbientLife] Spawned', this.npcs.length, 'NPCs,', this.traffic.length, 'traffic vehicles');
+    await this.spawnTraffic(roadSegments);
+    console.log('[AmbientLife]', this.npcs.length, 'NPCs,', this.traffic.length, 'cars');
   }
 
-  // ── Spawn chimney smoke (called after CityPopulator) ───────────────────────
-  createSmoke(chimneyPositions: THREE.Vector3[]) {
-    // Clean old smoke
+  // ── Chimney smoke ──────────────────────────────────────────────────────────
+  createSmoke(origins: THREE.Vector3[]) {
     for (const s of this.smokeCols) {
       this.scene.remove(s.particles);
       s.particles.geometry.dispose();
@@ -148,238 +134,199 @@ export class AmbientLife {
     }
     this.smokeCols = [];
 
-    for (const origin of chimneyPositions) {
-      const count = 20;
+    for (const origin of origins) {
+      const count = 16;
       const positions = new Float32Array(count * 3);
       const velocities = new Float32Array(count * 3);
       const life = new Float32Array(count);
-
-      for (let i = 0; i < count; i++) {
-        this.resetSmokeParticle(positions, velocities, life, i, origin);
-      }
+      for (let i = 0; i < count; i++) this.resetSmoke(positions, velocities, life, i, origin);
 
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-
-      const mat = new THREE.PointsMaterial({
-        color: 0x888888,
-        size: 0.25,
-        transparent: true,
-        opacity: 0.3,
-        depthWrite: false,
-      });
-
-      const points = new THREE.Points(geo, mat);
-      this.scene.add(points);
-      this.smokeCols.push({ particles: points, velocities, origin, life });
+      const mat = new THREE.PointsMaterial({ color: 0x888888, size: 0.25, transparent: true, opacity: 0.3, depthWrite: false });
+      const pts = new THREE.Points(geo, mat);
+      this.scene.add(pts);
+      this.smokeCols.push({ particles: pts, velocities, origin, life });
     }
   }
 
-  private resetSmokeParticle(pos: Float32Array, vel: Float32Array, life: Float32Array, i: number, origin: THREE.Vector3) {
+  private resetSmoke(pos: Float32Array, vel: Float32Array, life: Float32Array, i: number, o: THREE.Vector3) {
     const r = this.rng;
-    pos[i * 3]     = origin.x + (r() - 0.5) * 0.2;
-    pos[i * 3 + 1] = origin.y;
-    pos[i * 3 + 2] = origin.z + (r() - 0.5) * 0.2;
-    vel[i * 3]     = (r() - 0.5) * 0.01;
+    pos[i * 3] = o.x + (r() - 0.5) * 0.2;
+    pos[i * 3 + 1] = o.y;
+    pos[i * 3 + 2] = o.z + (r() - 0.5) * 0.2;
+    vel[i * 3] = (r() - 0.5) * 0.01;
     vel[i * 3 + 1] = 0.02 + r() * 0.03;
     vel[i * 3 + 2] = (r() - 0.5) * 0.01;
     life[i] = r();
   }
 
-  // ── Spawn NPC pedestrians ──────────────────────────────────────────────────
+  // ── NPCs ───────────────────────────────────────────────────────────────────
   private async spawnNPCs() {
     const r = this.rng;
-    const npcCount = 18;
+    const NPC_COUNT = 40; // many NPCs across the grid
 
-    for (let i = 0; i < npcCount; i++) {
+    for (let i = 0; i < NPC_COUNT; i++) {
       const charFile = NPC_CHARS[i % NPC_CHARS.length];
       const charLetter = charFile.replace('character-', '');
 
       let tex: THREE.Texture | null = null;
       try {
         tex = await this.texLoader.loadAsync('/kenney/textures/texture-' + charLetter + '.png');
-        tex.flipY = false;
-        tex.colorSpace = THREE.SRGBColorSpace;
-      } catch { /* fallback: no texture */ }
+        tex.flipY = false; tex.colorSpace = THREE.SRGBColorSpace;
+      } catch {}
 
       const model = await this.loadModel('characters', charFile);
       if (!model) continue;
 
-      // Apply character texture
       if (tex) {
-        model.traverse(child => {
-          if (child instanceof THREE.Mesh) {
-            const mat = child.material as THREE.MeshStandardMaterial;
-            mat.map = tex;
-            mat.needsUpdate = true;
-          }
+        model.traverse(c => {
+          if (c instanceof THREE.Mesh) { const m = c.material as THREE.MeshStandardMaterial; m.map = tex; m.needsUpdate = true; }
         });
       }
 
       model.scale.setScalar(0.7);
 
-      // Pick a random sidewalk path
-      const pathIdx = Math.floor(r() * SIDEWALK_PATHS.length);
-      const path = SIDEWALK_PATHS[pathIdx];
+      const pathIdx = Math.floor(r() * this.sidewalkPaths.length);
+      const path = this.sidewalkPaths[pathIdx];
       const progress = r();
       const pos = new THREE.Vector3().lerpVectors(path[0], path[1], progress);
+      pos.y = GROUND_Y;
       model.position.copy(pos);
       this.scene.add(model);
 
       this.npcs.push({
         model,
-        target: pos.clone(),
-        speed: NPC_SPEED * (0.6 + r() * 0.8),
+        speed: NPC_SPEED * (0.5 + r() * 1.0),
         pathIndex: pathIdx,
         pathProgress: progress,
         direction: r() > 0.5 ? 1 : -1,
-        idleTimer: 0,
+        idleTimer: r() * 3,
+        walkPhase: r() * Math.PI * 2,
       });
     }
   }
 
-  // ── Spawn ambient traffic ──────────────────────────────────────────────────
-  private async spawnTraffic() {
+  // ── Traffic ────────────────────────────────────────────────────────────────
+  private async spawnTraffic(segments: Array<{ from: THREE.Vector3; to: THREE.Vector3 }>) {
     const r = this.rng;
-
     let carsColormap: THREE.Texture | null = null;
     try {
       carsColormap = await this.texLoader.loadAsync('/kenney/textures/cars_colormap.png');
-      carsColormap.flipY = false;
-      carsColormap.colorSpace = THREE.SRGBColorSpace;
-    } catch { /* no colormap */ }
+      carsColormap.flipY = false; carsColormap.colorSpace = THREE.SRGBColorSpace;
+    } catch {}
 
-    const carCount = 12;
-    for (let i = 0; i < carCount; i++) {
+    // Place 2-3 cars per road segment (each street has 2 lanes = 2 segments)
+    // That's ~28 segments × 2 = ~56 cars total across the grid
+    const CAR_COUNT = Math.min(segments.length, 50); // cap for performance
+
+    for (let i = 0; i < CAR_COUNT; i++) {
+      const seg = segments[i % segments.length];
       const carFile = AMBIENT_CARS[i % AMBIENT_CARS.length];
       const model = await this.loadModel('cars', carFile, carsColormap);
       if (!model) continue;
 
       model.scale.setScalar(0.8);
-
-      const routeIdx = i % TRAFFIC_ROUTES.length;
       const progress = r();
-      const route = TRAFFIC_ROUTES[routeIdx];
-      const pos = new THREE.Vector3().lerpVectors(route[0], route[1], progress);
+      const pos = new THREE.Vector3().lerpVectors(seg.from, seg.to, progress);
       model.position.copy(pos);
 
-      // Face direction of travel
-      const dir = new THREE.Vector3().subVectors(route[1], route[0]).normalize();
+      const dir = new THREE.Vector3().subVectors(seg.to, seg.from).normalize();
       model.lookAt(model.position.clone().add(dir));
 
       this.scene.add(model);
-
       this.traffic.push({
         model,
-        routeIndex: routeIdx,
+        from: seg.from, to: seg.to,
         progress,
-        speed: CAR_SPEED * (0.7 + r() * 0.6),
+        speed: CAR_SPEED * (0.6 + r() * 0.8),
         respawnDelay: 0,
       });
     }
   }
 
-  // ── Tick (called every frame) ──────────────────────────────────────────────
+  // ── Tick ────────────────────────────────────────────────────────────────────
   tick(delta: number) {
     this.tickNPCs(delta);
     this.tickTraffic(delta);
     this.tickSmoke(delta);
   }
 
-  // ── NPC movement ───────────────────────────────────────────────────────────
   private tickNPCs(delta: number) {
     for (const npc of this.npcs) {
-      // Idle pause
       if (npc.idleTimer > 0) {
         npc.idleTimer -= delta;
-        // Bob slightly while idle
-        npc.model.position.y = GROUND_Y + Math.sin(Date.now() * 0.003) * 0.02;
+        npc.model.position.y = GROUND_Y;
+        npc.model.rotation.z = Math.sin(npc.walkPhase + performance.now() * 0.001) * 0.01;
+        npc.model.rotation.x = 0;
         continue;
       }
 
-      const path = SIDEWALK_PATHS[npc.pathIndex];
+      const path = this.sidewalkPaths[npc.pathIndex];
       const pathLen = new THREE.Vector3().subVectors(path[1], path[0]).length();
       const step = (npc.speed * delta) / pathLen;
-
       npc.pathProgress += step * npc.direction;
 
-      // Reached end of path — pause, then reverse or pick new path
       if (npc.pathProgress >= 1 || npc.pathProgress <= 0) {
         npc.pathProgress = THREE.MathUtils.clamp(npc.pathProgress, 0, 1);
-        npc.idleTimer = 1 + this.rng() * 4; // pause 1-5 seconds
-
-        // 40% chance to switch to a new path
-        if (this.rng() < 0.4) {
-          npc.pathIndex = Math.floor(this.rng() * SIDEWALK_PATHS.length);
+        npc.idleTimer = 1 + this.rng() * 3;
+        // 50% chance switch to connecting sidewalk
+        if (this.rng() < 0.5) {
+          npc.pathIndex = Math.floor(this.rng() * this.sidewalkPaths.length);
           npc.pathProgress = this.rng() > 0.5 ? 0 : 1;
         }
         npc.direction = npc.direction === 1 ? -1 : 1;
         continue;
       }
 
-      // Interpolate position along path
       const pos = new THREE.Vector3().lerpVectors(path[0], path[1], npc.pathProgress);
       npc.model.position.copy(pos);
-      npc.model.position.y = GROUND_Y;
 
-      // Face direction of movement
       const fwd = new THREE.Vector3().subVectors(path[1], path[0]).normalize();
       if (npc.direction === -1) fwd.negate();
       npc.model.lookAt(npc.model.position.clone().add(fwd));
+
+      // Procedural walk
+      npc.walkPhase += delta * npc.speed * 8;
+      npc.model.position.y = GROUND_Y + Math.abs(Math.sin(npc.walkPhase)) * 0.04;
+      npc.model.rotation.z = Math.sin(npc.walkPhase) * 0.05;
+      npc.model.rotation.x = Math.sin(npc.walkPhase * 2) * 0.02;
     }
   }
 
-  // ── Traffic movement ───────────────────────────────────────────────────────
   private tickTraffic(delta: number) {
     for (const car of this.traffic) {
       if (car.respawnDelay > 0) {
         car.respawnDelay -= delta;
-        if (car.respawnDelay <= 0) {
-          car.progress = 0;
-          car.model.visible = true;
-        }
+        if (car.respawnDelay <= 0) { car.progress = 0; car.model.visible = true; }
         continue;
       }
 
-      const route = TRAFFIC_ROUTES[car.routeIndex];
-      const routeLen = new THREE.Vector3().subVectors(route[1], route[0]).length();
-      const step = (car.speed * delta) / routeLen;
-
-      car.progress += step;
+      const routeLen = new THREE.Vector3().subVectors(car.to, car.from).length();
+      car.progress += (car.speed * delta) / routeLen;
 
       if (car.progress >= 1) {
-        // Reached end — hide, wait, respawn at start
         car.model.visible = false;
-        car.respawnDelay = 2 + this.rng() * 5;
+        car.respawnDelay = 1 + this.rng() * 4;
         continue;
       }
 
-      const pos = new THREE.Vector3().lerpVectors(route[0], route[1], car.progress);
+      const pos = new THREE.Vector3().lerpVectors(car.from, car.to, car.progress);
       car.model.position.copy(pos);
     }
   }
 
-  // ── Smoke particles ────────────────────────────────────────────────────────
   private tickSmoke(delta: number) {
     for (const col of this.smokeCols) {
       const pos = col.particles.geometry.attributes.position.array as Float32Array;
-      const count = col.life.length;
-
-      for (let i = 0; i < count; i++) {
+      for (let i = 0; i < col.life.length; i++) {
         col.life[i] += delta * 0.3;
-
-        if (col.life[i] >= 1) {
-          this.resetSmokeParticle(pos, col.velocities, col.life, i, col.origin);
-          continue;
-        }
-
+        if (col.life[i] >= 1) { this.resetSmoke(pos, col.velocities, col.life, i, col.origin); continue; }
         pos[i * 3]     += col.velocities[i * 3]     * delta * 30;
         pos[i * 3 + 1] += col.velocities[i * 3 + 1] * delta * 30;
         pos[i * 3 + 2] += col.velocities[i * 3 + 2] * delta * 30;
       }
-
       col.particles.geometry.attributes.position.needsUpdate = true;
-      (col.particles.material as THREE.PointsMaterial).opacity = 0.25;
     }
   }
 }

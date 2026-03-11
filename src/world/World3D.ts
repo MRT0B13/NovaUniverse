@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { ZONES, AGENT_DEFS, WORLD_WIDTH, WORLD_HEIGHT, ACTION_ZONE_MAP } from '../config/constants';
 import { AgentObject3D } from './AgentObject3D';
-import { VehicleObject3D } from './VehicleObject3D';
 import { CityPopulator } from './CityPopulator';
 import { AmbientLife } from './AmbientLife';
 import { apiFetch } from '../utils/auth';
@@ -28,11 +27,7 @@ const ZONE_BUILDINGS: Record<string, { dir: string; files: string[]; count: numb
   burn_furnace:   { dir: 'industrial',  files: ['chimney-large','chimney-small','chimney-basic','detail-tank','building-d','building-e'], count: 5 },
 };
 
-// ── Road tile models (laid along road paths) ──────────────────────────────────
-const ROAD_TILES = [
-  'road-straight',  'road-straight-sidewalk', 'road-straight-line',
-  'road-crossroad', 'road-crossing',
-];
+
 
 // ── Agent → character model + tint colour ─────────────────────────────────────
 export const AGENT_MODELS: Record<string, { model: string; color: number; cssColor: string }> = {
@@ -45,26 +40,7 @@ export const AGENT_MODELS: Record<string, { model: string; color: number; cssCol
   'nova-community':  { model: 'character-i', color: 0xffd700, cssColor: '#ffd700' },
 };
 
-// ── Road path waypoints (outer loop + cross roads) ────────────────────────────
-const ROAD_PATHS: THREE.Vector3[][] = [
-  // Clockwise outer loop
-  [
-    new THREE.Vector3(-10, GROUND_Y, -10),
-    new THREE.Vector3( 10, GROUND_Y, -10),
-    new THREE.Vector3( 10, GROUND_Y,  10),
-    new THREE.Vector3(-10, GROUND_Y,  10),
-  ],
-  // Inner cross (horizontal)
-  [
-    new THREE.Vector3(-12, GROUND_Y, 0),
-    new THREE.Vector3( 12, GROUND_Y, 0),
-  ],
-  // Inner cross (vertical)
-  [
-    new THREE.Vector3(0, GROUND_Y, -12),
-    new THREE.Vector3(0, GROUND_Y,  12),
-  ],
-];
+
 
 // ── Zone colours ──────────────────────────────────────────────────────────────
 const ZONE_COLORS: Record<string, number> = {
@@ -89,7 +65,7 @@ export class World3D {
 
   // 3D objects
   private agents = new Map<string, AgentObject3D>();
-  private vehicles: VehicleObject3D[] = [];
+
   private mixers: THREE.AnimationMixer[] = [];
 
   // City populator + ambient life
@@ -126,7 +102,7 @@ export class World3D {
 
     // Scene
     this.threeScene = new THREE.Scene();
-    this.threeScene.fog = new THREE.Fog(0x0a0a0f, 40, 80);
+    this.threeScene.fog = new THREE.FogExp2(0x0a0c14, 0.012);
 
     // Camera
     this.camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
@@ -163,82 +139,154 @@ export class World3D {
   // ── Lighting ────────────────────────────────────────────────────────────────
 
   private setupLighting() {
-    // Ambient — dark base
-    this.threeScene.add(new THREE.AmbientLight(0x222233, 1.2));
+    // Ambient — brighter base for better visibility
+    this.threeScene.add(new THREE.AmbientLight(0x334466, 1.8));
 
-    // Main directional — warm top light
-    const sun = new THREE.DirectionalLight(0xfff8e8, 2.5);
-    sun.position.set(15, 30, 10);
+    // Main directional — warm sunlight
+    const sun = new THREE.DirectionalLight(0xfff0d0, 3.0);
+    sun.position.set(20, 40, 15);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
     sun.shadow.camera.near = 0.1;
-    sun.shadow.camera.far = 100;
-    sun.shadow.camera.left = -30;
-    sun.shadow.camera.right = 30;
-    sun.shadow.camera.top = 30;
-    sun.shadow.camera.bottom = -30;
+    sun.shadow.camera.far = 120;
+    sun.shadow.camera.left = -35;
+    sun.shadow.camera.right = 35;
+    sun.shadow.camera.top = 35;
+    sun.shadow.camera.bottom = -35;
     this.threeScene.add(sun);
 
     // Fill light — cool blue from opposite side
-    const fill = new THREE.DirectionalLight(0x8899ff, 0.8);
-    fill.position.set(-10, 10, -10);
+    const fill = new THREE.DirectionalLight(0x8899ff, 1.0);
+    fill.position.set(-15, 12, -15);
     this.threeScene.add(fill);
+
+    // Hemisphere light — sky/ground colour gradient
+    const hemi = new THREE.HemisphereLight(0x446688, 0x222211, 0.6);
+    this.threeScene.add(hemi);
   }
 
   // ── Ground plane ────────────────────────────────────────────────────────────
 
   private buildGround() {
-    // Dark asphalt base
-    const groundGeo = new THREE.PlaneGeometry(60, 60, 30, 30);
-    const groundMat = new THREE.MeshLambertMaterial({ color: 0x0d0d12 });
+    // === Procedural ground texture (asphalt with subtle noise) ===
+    const groundCanvas = document.createElement('canvas');
+    groundCanvas.width = 512;
+    groundCanvas.height = 512;
+    const gctx = groundCanvas.getContext('2d')!;
+
+    // Base dark asphalt
+    gctx.fillStyle = '#1a1c22';
+    gctx.fillRect(0, 0, 512, 512);
+
+    // Subtle noise for asphalt texture
+    for (let i = 0; i < 8000; i++) {
+      const nx = Math.random() * 512;
+      const ny = Math.random() * 512;
+      const brightness = 20 + Math.floor(Math.random() * 15);
+      gctx.fillStyle = `rgb(${brightness},${brightness + 2},${brightness + 5})`;
+      gctx.fillRect(nx, ny, 1 + Math.random() * 2, 1 + Math.random() * 2);
+    }
+
+    // Faint grid lines every 32px
+    gctx.strokeStyle = 'rgba(60,65,80,0.15)';
+    gctx.lineWidth = 1;
+    for (let i = 0; i < 512; i += 32) {
+      gctx.beginPath(); gctx.moveTo(i, 0); gctx.lineTo(i, 512); gctx.stroke();
+      gctx.beginPath(); gctx.moveTo(0, i); gctx.lineTo(512, i); gctx.stroke();
+    }
+
+    const groundTex = new THREE.CanvasTexture(groundCanvas);
+    groundTex.wrapS = groundTex.wrapT = THREE.RepeatWrapping;
+    groundTex.repeat.set(15, 15);
+
+    const groundGeo = new THREE.PlaneGeometry(60, 60, 1, 1);
+    const groundMat = new THREE.MeshStandardMaterial({
+      map: groundTex,
+      roughness: 0.95,
+      metalness: 0.0,
+    });
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = true;
     this.threeScene.add(ground);
 
-    // Grid helper
-    const gridHelper = new THREE.GridHelper(60, 30, 0x1a1a2a, 0x111118);
-    gridHelper.position.y = 0.01;
+    // === Subtle grid overlay (dimmer) ===
+    const gridHelper = new THREE.GridHelper(60, 60, 0x222233, 0x16161e);
+    gridHelper.position.y = 0.015;
+    gridHelper.material.opacity = 0.3;
+    (gridHelper.material as THREE.Material).transparent = true;
     this.threeScene.add(gridHelper);
-
-    // Roads
-    this.addRoadStripes();
 
     // Zone floor pads + borders + accent lights
     this.addZonePads();
+
+    // === Sky dome (gradient hemisphere) ===
+    this.buildSkyDome();
+
+    // === Floating atmosphere particles ===
+    this.buildAtmosphere();
   }
 
-  private addRoadStripes() {
-    const roadMat = new THREE.MeshBasicMaterial({ color: 0x333344 });
-
-    // Horizontal road
-    const roadH = new THREE.Mesh(new THREE.PlaneGeometry(60, 2), roadMat);
-    roadH.rotation.x = -Math.PI / 2;
-    roadH.position.y = 0.02;
-    this.threeScene.add(roadH);
-
-    // Vertical road
-    const roadV = new THREE.Mesh(new THREE.PlaneGeometry(2, 60), roadMat);
-    roadV.rotation.x = -Math.PI / 2;
-    roadV.position.y = 0.02;
-    this.threeScene.add(roadV);
-
-    // Dashed centre lines (yellow)
-    const dashMat = new THREE.MeshBasicMaterial({ color: 0xffee44, transparent: true, opacity: 0.4 });
-    for (let i = -28; i < 30; i += 3) {
-      // Horizontal dashes
-      const dash = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 0.15), dashMat);
-      dash.rotation.x = -Math.PI / 2;
-      dash.position.set(i + 0.9, 0.03, 0);
-      this.threeScene.add(dash);
-
-      // Vertical dashes
-      const dashV = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 1.8), dashMat);
-      dashV.rotation.x = -Math.PI / 2;
-      dashV.position.set(0, 0.03, i + 0.9);
-      this.threeScene.add(dashV);
+  /** Gradient sky dome so the background isn't flat black */
+  private buildSkyDome() {
+    const skyGeo = new THREE.SphereGeometry(90, 32, 16);
+    // Vertex colours: dark blue at top → dark purple at horizon
+    const colours = new Float32Array(skyGeo.attributes.position.count * 3);
+    const pos = skyGeo.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const y = pos.getY(i);
+      const t = THREE.MathUtils.clamp((y + 90) / 180, 0, 1); // 0 = bottom, 1 = top
+      // Bottom: dark ground color → Top: deep night sky
+      const r = THREE.MathUtils.lerp(0.04, 0.03, t);
+      const g = THREE.MathUtils.lerp(0.04, 0.04, t);
+      const b = THREE.MathUtils.lerp(0.06, 0.10, t);
+      colours[i * 3]     = r;
+      colours[i * 3 + 1] = g;
+      colours[i * 3 + 2] = b;
     }
+    skyGeo.setAttribute('color', new THREE.BufferAttribute(colours, 3));
+    const skyMat = new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      side: THREE.BackSide,
+      fog: false,
+    });
+    const sky = new THREE.Mesh(skyGeo, skyMat);
+    this.threeScene.add(sky);
   }
+
+  /** Floating dust / haze particles for atmosphere */
+  private atmospherePoints: THREE.Points | null = null;
+  private atmosphereVelocities: Float32Array | null = null;
+
+  private buildAtmosphere() {
+    const count = 600;
+    const positions = new Float32Array(count * 3);
+    const velocities = new Float32Array(count * 3);
+
+    for (let i = 0; i < count; i++) {
+      positions[i * 3]     = (Math.random() - 0.5) * 60;
+      positions[i * 3 + 1] = 0.3 + Math.random() * 12;
+      positions[i * 3 + 2] = (Math.random() - 0.5) * 60;
+      velocities[i * 3]     = (Math.random() - 0.5) * 0.003;
+      velocities[i * 3 + 1] = (Math.random() - 0.5) * 0.001;
+      velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.003;
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const mat = new THREE.PointsMaterial({
+      color: 0x8899bb,
+      size: 0.08,
+      transparent: true,
+      opacity: 0.25,
+      depthWrite: false,
+    });
+    this.atmospherePoints = new THREE.Points(geo, mat);
+    this.atmosphereVelocities = velocities;
+    this.threeScene.add(this.atmospherePoints);
+  }
+
+  // Roads are now built by CityPopulator.buildStreetGrid()
 
   private addZonePads() {
     Object.entries(ZONES).forEach(([key, zone]) => {
@@ -342,26 +390,18 @@ export class World3D {
 
     // Load buildings per zone (each zone uses its pack's colormap)
     await this.loadZoneBuildings(bump);
-    console.log('[World3D] Buildings loaded');
+    console.log('[World3D] Zone buildings loaded');
 
-    // Load road tile models
-    await this.loadRoadTiles(bump);
-    console.log('[World3D] Roads loaded');
-
-    // Load vehicles
-    await this.loadVehicles(bump);
-    console.log('[World3D] Vehicles loaded');
-
-    // Populate city blocks outside zones
+    // Populate entire city — street grid + blocks + furniture
     await this.cityPopulator.populate((pct) => {
-      onProgress?.(Math.min(100, Math.round(70 + pct * 0.15)));
+      onProgress?.(Math.min(100, Math.round(40 + pct * 0.4)));
     });
-    console.log('[World3D] City populated');
+    console.log('[World3D] City grid populated');
     bump();
 
-    // Spawn ambient NPCs + traffic
-    await this.ambientLife.spawn();
-    // Wire chimney smoke from populator
+    // Spawn ambient NPCs on sidewalks + traffic on all roads
+    await this.ambientLife.spawn(this.cityPopulator.roadSegments);
+    // Chimney smoke
     this.ambientLife.createSmoke(this.cityPopulator.chimneyPositions);
     console.log('[World3D] Ambient life spawned');
     bump();
@@ -431,92 +471,8 @@ export class World3D {
     this.threeScene.add(mesh);
   }
 
-  private async loadRoadTiles(bump: () => void) {
-    const colormap = await this.getColormap('roads');
-
-    // Place road tiles along the main roads
-    const roadPositions: Array<{ x: number; z: number; ry: number; model: string }> = [];
-
-    // Horizontal road segments
-    for (let x = -12; x <= 12; x += 2) {
-      roadPositions.push({ x, z: 0, ry: 0, model: x === 0 ? 'road-crossroad' : 'road-straight' });
-    }
-    // Vertical road segments
-    for (let z = -12; z <= 12; z += 2) {
-      if (z === 0) continue; // already have crossroad at origin
-      roadPositions.push({ x: 0, z, ry: Math.PI / 2, model: 'road-straight' });
-    }
-
-    for (const rp of roadPositions) {
-      try {
-        const gltf = await this.loader.loadAsync('/kenney/models/roads/' + rp.model + '.glb');
-        const model = gltf.scene;
-        model.traverse(child => {
-          if (child instanceof THREE.Mesh) {
-            child.receiveShadow = true;
-            if (colormap) {
-              const mat = child.material as THREE.MeshStandardMaterial;
-              if (!mat.map) mat.map = colormap;
-              mat.needsUpdate = true;
-            }
-          }
-        });
-        model.position.set(rp.x, 0.005, rp.z);
-        model.rotation.y = rp.ry;
-        model.scale.setScalar(1.0);
-        this.threeScene.add(model);
-      } catch {
-        // Road tile not found — the procedural roads are still visible
-      }
-    }
-    bump();
-  }
-
-  private async loadVehicles(bump: () => void) {
-    const carModels = ['sedan', 'taxi', 'police', 'van', 'suv', 'ambulance', 'truck'];
-    const colormap = await this.getColormap('cars');
-    const path = ROAD_PATHS[0]; // outer loop
-
-    for (let i = 0; i < 6; i++) {
-      const modelName = carModels[i % carModels.length];
-      const startIdx = Math.floor((i / 6) * path.length);
-
-      try {
-        const gltf = await this.loader.loadAsync('/kenney/models/cars/' + modelName + '.glb');
-        const model = gltf.scene;
-
-        model.traverse(child => {
-          if (child instanceof THREE.Mesh) {
-            child.castShadow = true;
-            if (colormap) {
-              const mat = child.material as THREE.MeshStandardMaterial;
-              if (!mat.map) mat.map = colormap;
-              mat.needsUpdate = true;
-            }
-          }
-        });
-
-        model.scale.setScalar(0.8);
-        model.position.copy(path[startIdx]);
-        this.threeScene.add(model);
-        this.vehicles.push(new VehicleObject3D(model, path, startIdx));
-      } catch {
-        // Car GLB not found — place fallback box car
-        const carGeo = new THREE.BoxGeometry(0.3, 0.15, 0.5);
-        const carMat = new THREE.MeshLambertMaterial({
-          color: [0xff4444, 0xffee44, 0x4488ff, 0xffffff][i % 4],
-        });
-        const car = new THREE.Mesh(carGeo, carMat);
-        car.position.copy(path[startIdx]);
-        car.position.y = 0.075;
-        car.castShadow = true;
-        this.threeScene.add(car);
-        this.vehicles.push(new VehicleObject3D(car, path, startIdx));
-      }
-      bump();
-    }
-    bump(); // final vehicle step
-  }
+  // Road tiles are now placed by CityPopulator.buildStreetGrid()
+  // Vehicles are now spawned by AmbientLife
 
   // ── Agent spawning ────────────────────────────────────────────────────────
 
@@ -992,24 +948,46 @@ export class World3D {
     // Update animation mixers
     for (const m of this.mixers) m.update(delta);
 
-    // Update vehicles
-    for (const v of this.vehicles) v.update(delta);
-
     // Agent idle animations (subtle bob + sway when not walking)
     const time = performance.now() * 0.001;
     for (const [, agent] of this.agents) {
       if (!agent.state.isWalking) {
-        // Gentle breathing bob
-        agent.model.position.y = Math.sin(time * 1.5 + agent.color * 0.01) * 0.03;
+        // Gentle breathing bob — very subtle, pinned near ground
+        agent.model.position.y = Math.abs(Math.sin(time * 1.5 + agent.color * 0.01)) * 0.02;
         // Subtle body sway
-        agent.model.rotation.z = Math.sin(time * 0.8 + agent.color * 0.02) * 0.02;
-        agent.model.rotation.x = Math.cos(time * 0.6 + agent.color * 0.03) * 0.01;
+        agent.model.rotation.z = Math.sin(time * 0.8 + agent.color * 0.02) * 0.015;
+        agent.model.rotation.x = 0; // no forward lean when idle
+      } else {
+        // Walking: bounce + lean
+        agent.model.position.y = Math.abs(Math.sin(time * 6)) * 0.04;
+        agent.model.rotation.z = Math.sin(time * 6) * 0.04;
+        agent.model.rotation.x = 0.03; // slight forward lean
       }
       agent.updateBubble(this.camera);
     }
 
     // Update ambient life (NPCs, traffic, smoke)
     this.ambientLife.tick(delta);
+
+    // Animate atmosphere particles
+    if (this.atmospherePoints && this.atmosphereVelocities) {
+      const aPos = this.atmospherePoints.geometry.attributes.position.array as Float32Array;
+      const aVel = this.atmosphereVelocities;
+      const count = aPos.length / 3;
+      for (let i = 0; i < count; i++) {
+        aPos[i * 3]     += aVel[i * 3];
+        aPos[i * 3 + 1] += aVel[i * 3 + 1];
+        aPos[i * 3 + 2] += aVel[i * 3 + 2];
+        // Wrap around within world bounds
+        if (aPos[i * 3] > 30) aPos[i * 3] = -30;
+        if (aPos[i * 3] < -30) aPos[i * 3] = 30;
+        if (aPos[i * 3 + 2] > 30) aPos[i * 3 + 2] = -30;
+        if (aPos[i * 3 + 2] < -30) aPos[i * 3 + 2] = 30;
+        if (aPos[i * 3 + 1] > 12) aPos[i * 3 + 1] = 0.3;
+        if (aPos[i * 3 + 1] < 0.3) aPos[i * 3 + 1] = 12;
+      }
+      this.atmospherePoints.geometry.attributes.position.needsUpdate = true;
+    }
 
     // Render
     this.renderer.render(this.threeScene, this.camera);
