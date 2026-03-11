@@ -1,9 +1,8 @@
-import Phaser from 'phaser';
-import { WorldScene } from './world/WorldScene';
+import { World3D } from './world/World3D';
 import { HUD } from './ui/HUD';
 import { EventClient } from './events/EventClient';
 import { authenticate, getStoredToken, getStoredAddress, apiFetch } from './utils/auth';
-import { WORLD_WIDTH, WORLD_HEIGHT, ACTION_ZONE_MAP, ACTION_META } from './config/constants';
+import { ACTION_ZONE_MAP, ACTION_META, AGENT_DEFS } from './config/constants';
 
 // ─── AUTH SCREEN ──────────────────────────────────────────────────────────────
 
@@ -82,52 +81,46 @@ if (getStoredToken() && getStoredAddress()) {
 
 // ─── UNIVERSE BOOTSTRAP ───────────────────────────────────────────────────────
 
-function startUniverse() {
+async function startUniverse() {
   const hud = new HUD();
   hud.show();
 
-  const worldScene = new WorldScene();
-  worldScene.setHUD(hud);
+  // ── Three.js canvas boot ────────────────────────────────────────────────
+  const canvas = document.getElementById('world-canvas') as HTMLCanvasElement;
+  const world = new World3D(canvas);
+  world.setHUD(hud);
 
-  const config: Phaser.Types.Core.GameConfig = {
-    type: Phaser.AUTO,
-    width: window.innerWidth,
-    height: window.innerHeight,
-    backgroundColor: '#060606',
-    parent: 'game-container',
-    scene: worldScene,
-    physics: { default: 'arcade', arcade: { debug: false } },
-    scale: {
-      mode: Phaser.Scale.RESIZE,
-      autoCenter: Phaser.Scale.CENTER_BOTH,
-    },
-    render: {
-      antialias: false,
-      pixelArt: true,
-    },
-  };
+  // ── Loading bar during asset load ─────────────────────────────────────────
+  hud.showLoadingBar('Loading 3D assets…');
+  await world.loadAssets(pct => hud.updateLoadingProgress(pct));
+  hud.hideLoadingBar();
 
-  const game = new Phaser.Game(config);
+  // ── Render loop ───────────────────────────────────────────────────────────
+  function animate() {
+    requestAnimationFrame(animate);
+    world.tick();
+  }
+  animate();
 
   // ── EVENT CLIENT (WS + polling fallback) ──────────────────────────────────
   const eventClient = new EventClient();
   eventClient.onEvent(event => {
-    worldScene.handleEvent(event);
+    world.handleEvent(event);
     hud.pushEvent(event);
   });
   eventClient.connect();
 
-  // ── TIMELINE REPLAY HANDLER (Task 5) ──────────────────────────────────────
-  hud.setReplayHandler((event) => {
-    worldScene.replayEvent(event);
+  // ── TIMELINE REPLAY HANDLER ───────────────────────────────────────────────
+  hud.setReplayHandler(event => {
+    world.replayEvent(event);
   });
 
   // Load initial timeline events
   loadTimeline(hud);
 
   // ── DATA POLLING LOOP ─────────────────────────────────────────────────────
-  pollWorldState(worldScene, hud);
-  setInterval(() => pollWorldState(worldScene, hud), 10_000);
+  pollWorldState(world, hud);
+  setInterval(() => pollWorldState(world, hud), 10_000);
 }
 
 // ─── TIMELINE LOAD ────────────────────────────────────────────────────────────
@@ -155,7 +148,7 @@ async function loadTimeline(hud: HUD) {
 
 // ─── WORLD STATE POLLING ──────────────────────────────────────────────────────
 
-async function pollWorldState(scene: WorldScene, hud: HUD) {
+async function pollWorldState(world: World3D, hud: HUD) {
   try {
     const [worldState, portfolio, txSummary] = await Promise.allSettled([
       apiFetch('/universe/world-state'),
@@ -164,8 +157,19 @@ async function pollWorldState(scene: WorldScene, hud: HUD) {
     ]);
 
     if (worldState.status === 'fulfilled') {
-      const agents: any[] = worldState.value.agents ?? [];
-      scene.syncAgents(agents.map((a: any) => ({
+      let agents: any[] = worldState.value.agents ?? [];
+
+      // Fallback: if no agents from API, spawn all known agents in preview mode
+      if (agents.length === 0) {
+        agents = Object.keys(AGENT_DEFS).map(agentId => ({
+          agentId,
+          status: 'running',
+          messages24h: 0,
+          currentZone: null,
+        }));
+      }
+
+      world.syncAgents(agents.map((a: any) => ({
         agentId: a.agentId ?? a.agent_id,
         status: a.status ?? 'running',
         messages24h: a.messages24h ?? a.messages_24h ?? 0,
@@ -176,11 +180,15 @@ async function pollWorldState(scene: WorldScene, hud: HUD) {
     const pf  = portfolio.status === 'fulfilled' ? portfolio.value : null;
     const txs = txSummary.status === 'fulfilled' ? txSummary.value : null;
 
+    const novaVal = typeof pf?.nova === 'object'
+      ? pf.nova.balance ?? 0
+      : pf?.nova ?? pf?.nova_balance ?? 0;
+
     hud.updateStats({
-      portfolio: pf?.totalValue ?? pf?.total_value ?? 0,
-      agents: scene.getAgentCount(),
+      portfolio: pf?.summary?.total_value_usd ?? pf?.totalValue ?? pf?.total_value ?? 0,
+      agents: world.getAgentCount(),
       txs: txs?.today ?? txs?.count_today ?? 0,
-      nova: pf?.nova ?? pf?.nova_balance ?? 0,
+      nova: novaVal,
       address: getStoredAddress() ?? '',
     });
   } catch {
