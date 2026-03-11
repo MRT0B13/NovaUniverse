@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { CollisionWorld } from './CollisionWorld';
 
 export class VehicleObject3D {
   public model: THREE.Object3D;
@@ -14,7 +15,7 @@ export class VehicleObject3D {
     model.position.copy(path[this.pathIdx]);
   }
 
-  update(delta: number) {
+  update(delta: number, collision?: CollisionWorld) {
     if (this.path.length < 2) return;
 
     const from = this.path[this.pathIdx];
@@ -29,10 +30,19 @@ export class VehicleObject3D {
       this.pathIdx = (this.pathIdx + 1) % this.path.length;
     }
 
-    this.model.position.lerpVectors(from, to, this.progress);
+    const candidate = new THREE.Vector3().lerpVectors(from, to, this.progress);
+
+    // Only move if road is clear at this point
+    if (!collision || collision.isRoadClear(candidate)) {
+      this.model.position.copy(candidate);
+      this.model.position.y = 0; // pin to ground
+    }
+    // else: vehicle waits (simple stop behaviour)
 
     // Face direction of travel
     const dir = new THREE.Vector3().subVectors(to, from).normalize();
-    this.model.rotation.y = Math.atan2(dir.x, dir.z);
+    if (dir.length() > 0) {
+      this.model.rotation.y = Math.atan2(dir.x, dir.z);
+    }
   }
 }

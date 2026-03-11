@@ -4,6 +4,10 @@ import { ZONES, AGENT_DEFS, WORLD_WIDTH, WORLD_HEIGHT, ACTION_ZONE_MAP } from '.
 import { AgentObject3D } from './AgentObject3D';
 import { CityPopulator } from './CityPopulator';
 import { AmbientLife } from './AmbientLife';
+import { ZoneLayout } from './ZoneLayout';
+import { CollisionWorld } from './CollisionWorld';
+import { WeatherSystem } from './WeatherSystem';
+import type { WeatherState } from './WeatherSystem';
 import { apiFetch } from '../utils/auth';
 import type { HUD } from '../ui/HUD';
 import type { UniverseEvent } from '../events/EventClient';
@@ -65,12 +69,20 @@ export class World3D {
 
   // 3D objects
   private agents = new Map<string, AgentObject3D>();
-
   private mixers: THREE.AnimationMixer[] = [];
 
   // City populator + ambient life
   private cityPopulator: CityPopulator;
   private ambientLife: AmbientLife;
+
+  // Zone layout + collision + weather
+  private zoneLayouts = new Map<string, ZoneLayout>();
+  private buildingBoxes: THREE.Box3[] = [];
+  private collision = new CollisionWorld();
+  private weather!: WeatherSystem;
+  private sun!: THREE.DirectionalLight;
+  private ambient!: THREE.AmbientLight;
+  private fog!: THREE.FogExp2;
 
   // Camera control state
   private camTarget = new THREE.Vector3(0, 0, 0);
@@ -102,7 +114,8 @@ export class World3D {
 
     // Scene
     this.threeScene = new THREE.Scene();
-    this.threeScene.fog = new THREE.FogExp2(0x0a0c14, 0.012);
+    this.fog = new THREE.FogExp2(0x0a0c14, 0.012);
+    this.threeScene.fog = this.fog;
 
     // Camera
     this.camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
@@ -119,6 +132,9 @@ export class World3D {
 
     // Lighting
     this.setupLighting();
+
+    // Init weather system (needs sun, ambient, fog — set up by setupLighting)
+    this.weather = new WeatherSystem(this.threeScene, this.sun, this.ambient, this.fog);
 
     // Ground + roads + zone pads
     this.buildGround();
@@ -140,20 +156,21 @@ export class World3D {
 
   private setupLighting() {
     // Ambient — brighter base for better visibility
-    this.threeScene.add(new THREE.AmbientLight(0x334466, 1.8));
+    this.ambient = new THREE.AmbientLight(0x334466, 1.8);
+    this.threeScene.add(this.ambient);
 
     // Main directional — warm sunlight
-    const sun = new THREE.DirectionalLight(0xfff0d0, 3.0);
-    sun.position.set(20, 40, 15);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.near = 0.1;
-    sun.shadow.camera.far = 120;
-    sun.shadow.camera.left = -35;
-    sun.shadow.camera.right = 35;
-    sun.shadow.camera.top = 35;
-    sun.shadow.camera.bottom = -35;
-    this.threeScene.add(sun);
+    this.sun = new THREE.DirectionalLight(0xfff0d0, 3.0);
+    this.sun.position.set(20, 40, 15);
+    this.sun.castShadow = true;
+    this.sun.shadow.mapSize.set(2048, 2048);
+    this.sun.shadow.camera.near = 0.1;
+    this.sun.shadow.camera.far = 120;
+    this.sun.shadow.camera.left = -35;
+    this.sun.shadow.camera.right = 35;
+    this.sun.shadow.camera.top = 35;
+    this.sun.shadow.camera.bottom = -35;
+    this.threeScene.add(this.sun);
 
     // Fill light — cool blue from opposite side
     const fill = new THREE.DirectionalLight(0x8899ff, 1.0);
@@ -408,6 +425,14 @@ export class World3D {
 
     this.sceneReady = true;
     console.log('[World3D] Scene ready — sceneReady = true');
+
+    // Wire up weather panel in HUD
+    this.hud?.createWeatherPanel(
+      (w: WeatherState) => this.weather.setWeather(w),
+      () => this.weather.getTimeOfDay(),
+    );
+    // Start with overcast as default (matches NovaOS dark aesthetic)
+    this.weather.setWeather('overcast');
   }
 
   private async loadZoneBuildings(bump: () => void) {
@@ -418,21 +443,27 @@ export class World3D {
       const colormap = await this.getColormap(cfg.dir);
       const cx = zone.x * SCALE - WORLD_CX;
       const cz = zone.y * SCALE - WORLD_CZ;
-      const hw = (zone.w * SCALE) / 2;
-      const hh = (zone.h * SCALE) / 2;
+      const ww = zone.w * SCALE;
+      const wh = zone.h * SCALE;
       const zoneColor = ZONE_COLORS[zoneKey] ?? 0x888888;
 
-      for (let i = 0; i < cfg.count && i < cfg.files.length; i++) {
-        const path = '/kenney/models/' + cfg.dir + '/' + cfg.files[i] + '.glb';
-        const angle = (i / cfg.count) * Math.PI * 2;
-        const radius = Math.min(hw, hh) * 0.55;
-        const px = cx + Math.cos(angle) * radius;
-        const pz = cz + Math.sin(angle) * radius;
+      // Create layout grid for this zone
+      const layout = new ZoneLayout(cx, cz, ww, wh, 2.0);
+      this.zoneLayouts.set(zoneKey, layout);
 
+      let placed = 0;
+      for (const filename of cfg.files) {
+        if (placed >= cfg.count) break;
+
+        const slot = layout.nextSlot();
+        if (!slot) break;
+
+        const path = '/kenney/models/' + cfg.dir + '/' + filename + '.glb';
         try {
           const gltf = await this.loader.loadAsync(path);
           const model = gltf.scene;
-          console.log('[World3D] Loaded building:', path, 'children:', model.children.length);
+
+          // Apply texture
           model.traverse(child => {
             if (child instanceof THREE.Mesh) {
               child.castShadow = true;
@@ -445,14 +476,22 @@ export class World3D {
             }
           });
 
-          model.position.set(px, GROUND_Y, pz);
-          model.rotation.y = -angle + Math.PI;
+          // Place at slot position — flush with ground
+          model.position.set(slot.x, GROUND_Y, slot.z);
+          model.rotation.y = slot.rotation;
           model.scale.setScalar(1.2);
+
           this.threeScene.add(model);
+
+          // Register bounding box for collision
+          const box = new THREE.Box3().setFromObject(model);
+          this.buildingBoxes.push(box);
+          this.collision.addBuilding(`${zoneKey}_${placed}`, model);
+
+          placed++;
         } catch (err) {
           console.warn('[World3D] Failed to load:', path, err);
-          // GLB not found — place a fallback coloured box
-          this.placeFallbackBuilding(px, pz, zoneColor, 0.6 + Math.random() * 0.8);
+          this.placeFallbackBuilding(slot.x, slot.z, zoneColor, 0.6 + Math.random() * 0.8);
         }
       }
       bump();
@@ -484,59 +523,54 @@ export class World3D {
 
     const def = AGENT_DEFS[agentId];
     const zone = def?.zone ? ZONES[def.zone] : null;
-    const spawnX = zone ? (zone.x * SCALE - WORLD_CX) + (Math.random() - 0.5) * (zone.w * SCALE * 0.4) : 0;
-    const spawnZ = zone ? (zone.y * SCALE - WORLD_CZ) + (Math.random() - 0.5) * (zone.h * SCALE * 0.4) : 0;
+    const cx = zone ? (zone.x * SCALE - WORLD_CX) : 0;
+    const cz = zone ? (zone.y * SCALE - WORLD_CZ) : 0;
 
-    let model: THREE.Object3D;
-    let mixer: THREE.AnimationMixer | null = null;
-    let animations: THREE.AnimationClip[] = [];
+    // Use zone layout to find a valid spawn point (clear of buildings)
+    const layout = (def?.zone) ? this.zoneLayouts.get(def.zone) : null;
+    const spawnPoints = layout ? layout.getAgentSpawnPoints(cx, cz, 3) : [new THREE.Vector3(cx, 0, cz)];
+    const spawn = spawnPoints[this.agents.size % spawnPoints.length];
+
+    // Resolve against collision world for a clear spot
+    const clearSpawn = this.collision.findClearSpawn(
+      new THREE.Vector3(spawn.x, 0, spawn.z), 0.4
+    );
 
     try {
-      // Try loading character GLB
       const charLetter = cfg.model.replace('character-', '');
-      let tex: THREE.Texture | null = null;
+      const [gltf, tex] = await Promise.all([
+        this.loader.loadAsync('/kenney/models/characters/' + cfg.model + '.glb'),
+        this.texLoader.loadAsync('/kenney/textures/texture-' + charLetter + '.png')
+          .then(t => { t.flipY = false; return t; })
+          .catch(() => null as THREE.Texture | null),
+      ]);
 
-      try {
-        tex = await this.texLoader.loadAsync('/kenney/textures/texture-' + charLetter + '.png');
-        tex.flipY = false;
-      } catch { /* no character texture — use colour tint only */ }
+      const agent = await AgentObject3D.load(
+        this.threeScene, agentId, gltf, tex, cfg.color, cfg.cssColor,
+        clearSpawn.x, clearSpawn.z
+      );
 
-      const gltf = await this.loader.loadAsync('/kenney/models/characters/' + cfg.model + '.glb');
-      model = gltf.scene;
-      console.log('[World3D] Loaded agent:', agentId, 'model:', cfg.model);
+      // Add name label above agent
+      this.addAgentLabel(def?.label ?? agentId, agent.model, cfg.color);
 
-      model.traverse(child => {
-        if (child instanceof THREE.Mesh) {
-          child.castShadow = true;
-          const mat = child.material as THREE.MeshStandardMaterial;
-          if (tex) mat.map = tex;
-          mat.emissive = new THREE.Color(cfg.color).multiplyScalar(0.15);
-          mat.needsUpdate = true;
-        }
-      });
+      this.mixers.push(agent.mixer);
+      agent.state.currentZone = def?.zone ?? '';
+      this.agents.set(agentId, agent);
+      this.clickables.push({ mesh: agent.model, type: 'agent', id: agentId });
+    } catch (e) {
+      console.warn(`[World3D] Failed to spawn ${agentId}`, e);
+      // Fallback procedural agent
+      const model = this.createFallbackAgent(cfg.color);
+      model.position.set(clearSpawn.x, GROUND_Y, clearSpawn.z);
+      this.threeScene.add(model);
+      this.addAgentLabel(def?.label ?? agentId, model, cfg.color);
 
-      model.scale.setScalar(0.8);
-      animations = gltf.animations;
-
-      if (animations.length > 0) {
-        mixer = new THREE.AnimationMixer(model);
-        this.mixers.push(mixer);
-      }
-    } catch {
-      // GLB not found — create a procedural character (coloured capsule)
-      model = this.createFallbackAgent(cfg.color);
+      const mixer = new THREE.AnimationMixer(model);
+      const agent = new AgentObject3D(agentId, model, mixer, null, null, cfg.color, cfg.cssColor);
+      agent.state.currentZone = def?.zone ?? '';
+      this.agents.set(agentId, agent);
+      this.clickables.push({ mesh: model, type: 'agent', id: agentId });
     }
-
-    model.position.set(spawnX, GROUND_Y, spawnZ);
-    this.threeScene.add(model);
-
-    // Add name label above agent
-    this.addAgentLabel(def?.label ?? agentId, model, cfg.color);
-
-    const agent = new AgentObject3D(agentId, model, mixer, cfg.color, cfg.cssColor, animations);
-    agent.state.currentZone = def?.zone ?? '';
-    this.agents.set(agentId, agent);
-    this.clickables.push({ mesh: model, type: 'agent', id: agentId });
   }
 
   private createFallbackAgent(color: number): THREE.Group {
@@ -636,7 +670,7 @@ export class World3D {
       if (zone) {
         const tx = (zone.x * SCALE - WORLD_CX) + (Math.random() - 0.5) * (zone.w * SCALE * 0.5);
         const tz = (zone.y * SCALE - WORLD_CZ) + (Math.random() - 0.5) * (zone.h * SCALE * 0.5);
-        agent.walkTo(tx, tz, this.mixers);
+        agent.walkTo(tx, tz, this.collision);
         agent.state.currentZone = zoneKey;
       }
     }
@@ -934,34 +968,32 @@ export class World3D {
   // ── Tick (called every frame) ─────────────────────────────────────────────
 
   tick() {
-    const delta = this.clock.getDelta();
+    const delta = this.clock.getDelta(); // ONLY call once per frame
 
-    // WASD camera pan
-    const speed = 0.15;
+    // Update weather system (time of day + rain + lightning)
+    this.weather.update(delta);
+
+    // WASD camera pan (use speed * delta for frame-rate independence)
+    const speed = 6 * delta;
     let moved = false;
-    if (this.keys.has('w') || this.keys.has('ArrowUp'))    { this.camTarget.z -= speed; moved = true; }
-    if (this.keys.has('s') || this.keys.has('ArrowDown'))  { this.camTarget.z += speed; moved = true; }
-    if (this.keys.has('a') || this.keys.has('ArrowLeft'))  { this.camTarget.x -= speed; moved = true; }
-    if (this.keys.has('d') || this.keys.has('ArrowRight')) { this.camTarget.x += speed; moved = true; }
+    if (this.keys.has('ArrowUp'))    { this.camTarget.z -= speed; moved = true; }
+    if (this.keys.has('ArrowDown'))  { this.camTarget.z += speed; moved = true; }
+    if (this.keys.has('ArrowLeft'))  { this.camTarget.x -= speed; moved = true; }
+    if (this.keys.has('ArrowRight')) { this.camTarget.x += speed; moved = true; }
     if (moved) this.updateCamera();
 
     // Update animation mixers
     for (const m of this.mixers) m.update(delta);
 
-    // Agent idle animations (subtle bob + sway when not walking)
+    // Agent idle animations — subtle sway only (Y grounding is handled by AgentObject3D)
     const time = performance.now() * 0.001;
     for (const [, agent] of this.agents) {
       if (!agent.state.isWalking) {
-        // Gentle breathing bob — very subtle, pinned near ground
-        agent.model.position.y = Math.abs(Math.sin(time * 1.5 + agent.color * 0.01)) * 0.02;
-        // Subtle body sway
         agent.model.rotation.z = Math.sin(time * 0.8 + agent.color * 0.02) * 0.015;
-        agent.model.rotation.x = 0; // no forward lean when idle
+        agent.model.rotation.x = 0;
       } else {
-        // Walking: bounce + lean
-        agent.model.position.y = Math.abs(Math.sin(time * 6)) * 0.04;
         agent.model.rotation.z = Math.sin(time * 6) * 0.04;
-        agent.model.rotation.x = 0.03; // slight forward lean
+        agent.model.rotation.x = 0.03;
       }
       agent.updateBubble(this.camera);
     }
@@ -978,7 +1010,6 @@ export class World3D {
         aPos[i * 3]     += aVel[i * 3];
         aPos[i * 3 + 1] += aVel[i * 3 + 1];
         aPos[i * 3 + 2] += aVel[i * 3 + 2];
-        // Wrap around within world bounds
         if (aPos[i * 3] > 30) aPos[i * 3] = -30;
         if (aPos[i * 3] < -30) aPos[i * 3] = 30;
         if (aPos[i * 3 + 2] > 30) aPos[i * 3 + 2] = -30;
