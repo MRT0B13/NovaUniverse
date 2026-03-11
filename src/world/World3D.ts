@@ -3,6 +3,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { ZONES, AGENT_DEFS, WORLD_WIDTH, WORLD_HEIGHT, ACTION_ZONE_MAP } from '../config/constants';
 import { AgentObject3D } from './AgentObject3D';
 import { VehicleObject3D } from './VehicleObject3D';
+import { CityPopulator } from './CityPopulator';
+import { AmbientLife } from './AmbientLife';
 import { apiFetch } from '../utils/auth';
 import type { HUD } from '../ui/HUD';
 import type { UniverseEvent } from '../events/EventClient';
@@ -90,6 +92,10 @@ export class World3D {
   private vehicles: VehicleObject3D[] = [];
   private mixers: THREE.AnimationMixer[] = [];
 
+  // City populator + ambient life
+  private cityPopulator: CityPopulator;
+  private ambientLife: AmbientLife;
+
   // Camera control state
   private camTarget = new THREE.Vector3(0, 0, 0);
   private camOffset = new THREE.Vector3(0, CAM_HEIGHT, CAM_HEIGHT * 0.8);
@@ -130,6 +136,10 @@ export class World3D {
     this.loader = new GLTFLoader();
     this.texLoader = new THREE.TextureLoader();
     this.clock = new THREE.Clock();
+
+    // City systems
+    this.cityPopulator = new CityPopulator(this.threeScene, this.loader, this.texLoader);
+    this.ambientLife   = new AmbientLife(this.threeScene, this.loader, this.texLoader);
 
     // Lighting
     this.setupLighting();
@@ -325,19 +335,39 @@ export class World3D {
 
   async loadAssets(onProgress?: (pct: number) => void): Promise<void> {
     let loaded = 0;
-    const totalSteps = Object.keys(ZONE_BUILDINGS).length + 6; // zones + vehicles + roads
+    const totalSteps = Object.keys(ZONE_BUILDINGS).length + 10; // zones + vehicles + roads + city + life
     const bump = () => { loaded++; onProgress?.(Math.min(100, Math.round((loaded / totalSteps) * 100))); };
+
+    console.log('[World3D] Starting asset load…');
 
     // Load buildings per zone (each zone uses its pack's colormap)
     await this.loadZoneBuildings(bump);
+    console.log('[World3D] Buildings loaded');
 
     // Load road tile models
     await this.loadRoadTiles(bump);
+    console.log('[World3D] Roads loaded');
 
     // Load vehicles
     await this.loadVehicles(bump);
+    console.log('[World3D] Vehicles loaded');
+
+    // Populate city blocks outside zones
+    await this.cityPopulator.populate((pct) => {
+      onProgress?.(Math.min(100, Math.round(70 + pct * 0.15)));
+    });
+    console.log('[World3D] City populated');
+    bump();
+
+    // Spawn ambient NPCs + traffic
+    await this.ambientLife.spawn();
+    // Wire chimney smoke from populator
+    this.ambientLife.createSmoke(this.cityPopulator.chimneyPositions);
+    console.log('[World3D] Ambient life spawned');
+    bump();
 
     this.sceneReady = true;
+    console.log('[World3D] Scene ready — sceneReady = true');
   }
 
   private async loadZoneBuildings(bump: () => void) {
@@ -355,15 +385,14 @@ export class World3D {
       for (let i = 0; i < cfg.count && i < cfg.files.length; i++) {
         const path = '/kenney/models/' + cfg.dir + '/' + cfg.files[i] + '.glb';
         const angle = (i / cfg.count) * Math.PI * 2;
-        const radius = Math.min(hw, hh) * 0.7;
+        const radius = Math.min(hw, hh) * 0.55;
         const px = cx + Math.cos(angle) * radius;
         const pz = cz + Math.sin(angle) * radius;
 
         try {
           const gltf = await this.loader.loadAsync(path);
           const model = gltf.scene;
-
-          // Apply the pack's colormap texture
+          console.log('[World3D] Loaded building:', path, 'children:', model.children.length);
           model.traverse(child => {
             if (child instanceof THREE.Mesh) {
               child.castShadow = true;
@@ -378,9 +407,10 @@ export class World3D {
 
           model.position.set(px, GROUND_Y, pz);
           model.rotation.y = -angle + Math.PI;
-          model.scale.setScalar(0.012);
+          model.scale.setScalar(1.2);
           this.threeScene.add(model);
-        } catch {
+        } catch (err) {
+          console.warn('[World3D] Failed to load:', path, err);
           // GLB not found — place a fallback coloured box
           this.placeFallbackBuilding(px, pz, zoneColor, 0.6 + Math.random() * 0.8);
         }
@@ -433,7 +463,7 @@ export class World3D {
         });
         model.position.set(rp.x, 0.005, rp.z);
         model.rotation.y = rp.ry;
-        model.scale.setScalar(0.01);
+        model.scale.setScalar(1.0);
         this.threeScene.add(model);
       } catch {
         // Road tile not found — the procedural roads are still visible
@@ -466,7 +496,7 @@ export class World3D {
           }
         });
 
-        model.scale.setScalar(0.008);
+        model.scale.setScalar(0.8);
         model.position.copy(path[startIdx]);
         this.threeScene.add(model);
         this.vehicles.push(new VehicleObject3D(model, path, startIdx));
@@ -517,6 +547,7 @@ export class World3D {
 
       const gltf = await this.loader.loadAsync('/kenney/models/characters/' + cfg.model + '.glb');
       model = gltf.scene;
+      console.log('[World3D] Loaded agent:', agentId, 'model:', cfg.model);
 
       model.traverse(child => {
         if (child instanceof THREE.Mesh) {
@@ -528,7 +559,7 @@ export class World3D {
         }
       });
 
-      model.scale.setScalar(0.012);
+      model.scale.setScalar(0.8);
       animations = gltf.animations;
 
       if (animations.length > 0) {
@@ -964,8 +995,21 @@ export class World3D {
     // Update vehicles
     for (const v of this.vehicles) v.update(delta);
 
-    // Update agent action bubbles (3D → screen projection)
-    for (const [, a] of this.agents) a.updateBubble(this.camera);
+    // Agent idle animations (subtle bob + sway when not walking)
+    const time = performance.now() * 0.001;
+    for (const [, agent] of this.agents) {
+      if (!agent.state.isWalking) {
+        // Gentle breathing bob
+        agent.model.position.y = Math.sin(time * 1.5 + agent.color * 0.01) * 0.03;
+        // Subtle body sway
+        agent.model.rotation.z = Math.sin(time * 0.8 + agent.color * 0.02) * 0.02;
+        agent.model.rotation.x = Math.cos(time * 0.6 + agent.color * 0.03) * 0.01;
+      }
+      agent.updateBubble(this.camera);
+    }
+
+    // Update ambient life (NPCs, traffic, smoke)
+    this.ambientLife.tick(delta);
 
     // Render
     this.renderer.render(this.threeScene, this.camera);
