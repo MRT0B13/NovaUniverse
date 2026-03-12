@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import type { CollisionWorld } from './CollisionWorld';
 
 // ── Agent State ────────────────────────────────────────────────────────────────
 
@@ -15,88 +17,185 @@ export interface AgentState3D {
 export class AgentObject3D {
   public agentId: string;
   public model: THREE.Object3D;
+  public mixer: THREE.AnimationMixer;
   public color: number;
   public cssColor: string;
   public state: AgentState3D;
 
-  private mixer: THREE.AnimationMixer | null;
-  private walkClip: THREE.AnimationAction | null = null;
-  private idleClip: THREE.AnimationAction | null = null;
+  private idleAction: THREE.AnimationAction | null;
+  private walkAction: THREE.AnimationAction | null;
 
   // Floating action bubble (DOM-based, positioned via 3D projection)
   private bubbleDiv: HTMLElement | null = null;
   private bubbleTimeout: ReturnType<typeof setTimeout> | null = null;
 
+  // Grounded Y position (computed once at spawn)
+  private groundY = 0;
+
+  // Zone identity visuals
+  public groundRing: THREE.Mesh | null = null;
+  public agentLight: THREE.PointLight | null = null;
+
   constructor(
     agentId: string,
     model: THREE.Object3D,
-    mixer: THREE.AnimationMixer | null,
+    mixer: THREE.AnimationMixer,
+    idleAction: THREE.AnimationAction | null,
+    walkAction: THREE.AnimationAction | null,
     color: number,
     cssColor: string,
-    animations: THREE.AnimationClip[] = [],
   ) {
-    this.agentId  = agentId;
-    this.model    = model;
-    this.mixer    = mixer;
-    this.color    = color;
-    this.cssColor = cssColor;
-    this.state    = {
+    this.agentId    = agentId;
+    this.model      = model;
+    this.mixer      = mixer;
+    this.idleAction = idleAction;
+    this.walkAction = walkAction;
+    this.color      = color;
+    this.cssColor   = cssColor;
+    this.groundY    = model.position.y;
+    this.state      = {
       agentId,
       status: 'running',
       currentZone: '',
       messages24h: 0,
       isWalking: false,
     };
-
-    if (mixer && animations.length > 0) {
-      const idleC = animations.find(c => c.name.toLowerCase().includes('idle')) ?? animations[0];
-      const walkC = animations.find(c => c.name.toLowerCase().includes('walk'))
-                 ?? animations[1]
-                 ?? animations[0];
-      if (idleC) { this.idleClip = mixer.clipAction(idleC); this.idleClip.play(); }
-      if (walkC) this.walkClip = mixer.clipAction(walkC);
-    }
   }
 
-  // ── Walk to world position ─────────────────────────────────────────────────
+  /**
+   * Factory: load a GLTF agent, ground it, set up animations correctly.
+   * Pass the raw GLTF result (not just gltf.scene) so we get gltf.animations.
+   */
+  static async load(
+    scene: THREE.Scene,
+    agentId: string,
+    gltf: GLTF,
+    tex: THREE.Texture | null,
+    color: number,
+    cssColor: string,
+    spawnX: number,
+    spawnZ: number,
+  ): Promise<AgentObject3D> {
+    const model = gltf.scene;
 
-  walkTo(tx: number, tz: number, _mixers: THREE.AnimationMixer[]) {
+    // 1. Apply texture + emissive tint
+    model.traverse(child => {
+      if (child instanceof THREE.Mesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+        const mat = new THREE.MeshLambertMaterial({ map: tex ?? undefined });
+        mat.emissive = new THREE.Color(color).multiplyScalar(0.15);
+        child.material = mat;
+      }
+    });
+
+    // 2. Scale first, then ground — compute bounding box after scale applied
+    model.scale.setScalar(0.8);
+    model.position.set(spawnX, 0, spawnZ);
+    model.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(model);
+    const bottomY = box.min.y;
+    model.position.y = -bottomY; // offset so feet sit at Y=0
+
+    // 3. Animations — use gltf.animations (NOT gltf.scene.__gltfAnimations)
+    const mixer = new THREE.AnimationMixer(model);
+    const clips = gltf.animations;
+
+    const findClip = (name: string) =>
+      clips.find(c => c.name.toLowerCase().includes(name.toLowerCase()));
+
+    const idleClip = findClip('idle') ?? findClip('stand') ?? clips[0] ?? null;
+    const walkClip = findClip('walk') ?? findClip('run')  ?? clips[1] ?? clips[0] ?? null;
+
+    const idleAction = idleClip ? mixer.clipAction(idleClip) : null;
+    const walkAction = walkClip ? mixer.clipAction(walkClip) : null;
+
+    // Start idle
+    idleAction?.play();
+
+    // 4. Ground ring (colored circle below feet)
+    const ringGeo = new THREE.RingGeometry(0.22, 0.32, 24);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+    });
+    const groundRing = new THREE.Mesh(ringGeo, ringMat);
+    groundRing.rotation.x = -Math.PI / 2;
+    groundRing.position.set(spawnX, 0.02, spawnZ);
+    scene.add(groundRing);
+
+    // 5. Agent glow point light
+    const agentLight = new THREE.PointLight(color, 0.4, 3);
+    agentLight.position.set(spawnX, 0.8, spawnZ);
+    scene.add(agentLight);
+
+    scene.add(model);
+
+    const agent = new AgentObject3D(agentId, model, mixer, idleAction, walkAction, color, cssColor);
+    agent.groundRing = groundRing;
+    agent.agentLight = agentLight;
+    return agent;
+  }
+
+  // ── Walk to world position (collision-aware) ───────────────────────────────
+
+  walkTo(tx: number, tz: number, collision?: CollisionWorld) {
     if (this.state.isWalking) return;
     this.state.isWalking = true;
 
-    // Face direction of travel
-    const dx = tx - this.model.position.x;
-    const dz = tz - this.model.position.z;
-    this.model.rotation.y = Math.atan2(dx, dz);
-
-    // Switch to walk animation
-    if (this.walkClip && this.idleClip) {
-      this.idleClip.stop();
-      this.walkClip.reset().play();
+    // Resolve destination through collision if available
+    let destX = tx, destZ = tz;
+    if (collision) {
+      const from = this.model.position.clone();
+      const to   = new THREE.Vector3(tx, from.y, tz);
+      const safe = collision.resolveMove(from, to, 0.4);
+      destX = safe.x;
+      destZ = safe.z;
     }
 
-    const duration = 2000;
-    const start = { x: this.model.position.x, z: this.model.position.z };
+    // Face direction of travel
+    const dx = destX - this.model.position.x;
+    const dz = destZ - this.model.position.z;
+    this.model.rotation.y = Math.atan2(dx, dz);
+
+    // Transition to walk animation
+    if (this.walkAction && this.idleAction) {
+      this.idleAction.fadeOut(0.2);
+      this.walkAction.reset().fadeIn(0.2).play();
+    }
+
+    const startX = this.model.position.x;
+    const startZ = this.model.position.z;
+    const duration = 2200;
     const startMs = performance.now();
 
     const tick = () => {
       const t = Math.min((performance.now() - startMs) / duration, 1);
-      // Ease in-out quad
       const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
-      this.model.position.x = start.x + (tx - start.x) * ease;
-      this.model.position.z = start.z + (tz - start.z) * ease;
+      this.model.position.x = startX + (destX - startX) * ease;
+      this.model.position.z = startZ + (destZ - startZ) * ease;
+      this.model.position.y = this.groundY; // never drift off ground
+
+      // Sync ring + light with agent position
+      if (this.groundRing) {
+        this.groundRing.position.x = this.model.position.x;
+        this.groundRing.position.z = this.model.position.z;
+      }
+      if (this.agentLight) {
+        this.agentLight.position.x = this.model.position.x;
+        this.agentLight.position.z = this.model.position.z;
+      }
 
       if (t < 1) {
         requestAnimationFrame(tick);
       } else {
         this.state.isWalking = false;
-        if (this.walkClip && this.idleClip) {
-          this.walkClip.stop();
-          this.idleClip.reset().play();
+        if (this.walkAction && this.idleAction) {
+          this.walkAction.fadeOut(0.2);
+          this.idleAction.reset().fadeIn(0.2).play();
         }
       }
     };
-    tick();
+    requestAnimationFrame(tick);
   }
 
   // ── Action bubble (floating DOM label projected from 3D) ───────────────────
@@ -172,5 +271,7 @@ export class AgentObject3D {
   destroy() {
     this.clearBubble();
     this.model.removeFromParent();
+    if (this.groundRing) this.groundRing.removeFromParent();
+    if (this.agentLight) this.agentLight.removeFromParent();
   }
 }

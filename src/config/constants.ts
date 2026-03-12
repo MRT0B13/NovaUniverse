@@ -156,6 +156,15 @@ export const ZONES: Record<string, {
     icon: '🔥',
     description: 'Token burns · Credit system',
   },
+  nova_bank: {
+    label: 'Nova Bank',
+    x: 400, y: 1400,
+    w: 280, h: 220,
+    color: 0x0d0a00,
+    borderColor: 0xffd700,
+    icon: '🏦',
+    description: 'Vault deposits · Yield claims · Treasury',
+  },
 };
 
 // ─── ACTION → ANIMATION MAPPING ───────────────────────────────────────────────
@@ -179,6 +188,9 @@ export const ACTION_ZONE_MAP: Record<string, string> = {
   intel: 'intel_hub',
   alert: 'watchtower',
   report: 'command_center',
+  vault_deposit:  'nova_bank',
+  vault_withdraw: 'nova_bank',
+  yield_claimed:  'nova_bank',
 };
 
 // ─── ACTION DISPLAY ───────────────────────────────────────────────────────────

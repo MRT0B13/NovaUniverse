@@ -1,5 +1,6 @@
 import { ZONES } from '../config/constants';
 import type { UniverseEvent } from '../events/EventClient';
+import type { WeatherState } from '../world/WeatherSystem';
 
 const MAX_FEED_ITEMS = 6;
 const FEED_ITEM_LIFETIME = 8_000;
@@ -335,5 +336,65 @@ export class HUD {
     if (diff < 10) return 'now';
     if (diff < 60) return diff + 's';
     return Math.floor(diff / 60) + 'm';
+  }
+
+  // ── WEATHER PANEL ─────────────────────────────────────────────────────────
+
+  createWeatherPanel(onSetWeather: (w: WeatherState) => void, onGetTime: () => number) {
+    const panel = document.createElement('div');
+    panel.id = 'weather-panel';
+    panel.style.cssText =
+      'position:absolute;bottom:48px;left:16px;' +
+      'background:rgba(6,6,6,0.92);border:1px solid #1a1a2a;' +
+      'border-radius:6px;padding:12px 16px;pointer-events:all;' +
+      'font-family:"Space Mono",monospace;font-size:10px;' +
+      'display:none;z-index:20;';
+
+    const states: WeatherState[] = ['clear', 'overcast', 'rain', 'storm'];
+    const icons: Record<string, string> = { clear: '\u2600\uFE0F', overcast: '\u2601\uFE0F', rain: '\uD83C\uDF27\uFE0F', storm: '\u26C8\uFE0F' };
+
+    let buttonsHtml = '';
+    for (const s of states) {
+      buttonsHtml +=
+        '<button data-weather="' + s + '" style="' +
+        'background:#111;border:1px solid #222;border-radius:4px;' +
+        'padding:4px 8px;cursor:pointer;color:#888;font-size:10px;' +
+        'font-family:\'Space Mono\',monospace;pointer-events:all;' +
+        '">' + icons[s] + ' ' + s + '</button>';
+    }
+
+    panel.innerHTML =
+      '<div style="color:#555;text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">Weather</div>' +
+      '<div style="display:flex;gap:8px;margin-bottom:10px">' + buttonsHtml + '</div>' +
+      '<div style="color:#555;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Time of Day</div>' +
+      '<div id="time-display" style="color:#00ff88">14:00</div>';
+
+    panel.querySelectorAll('button[data-weather]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const w = (btn as HTMLElement).dataset.weather as WeatherState;
+        onSetWeather(w);
+        panel.querySelectorAll('button').forEach(b =>
+          (b as HTMLElement).style.borderColor = b === btn ? '#00ff88' : '#222'
+        );
+      });
+    });
+
+    document.getElementById('hud')!.appendChild(panel);
+
+    // Update time display each second
+    setInterval(() => {
+      const h = onGetTime();
+      const hours   = Math.floor(h).toString().padStart(2, '0');
+      const minutes = Math.floor((h % 1) * 60).toString().padStart(2, '0');
+      const el = document.getElementById('time-display');
+      if (el) el.textContent = hours + ':' + minutes;
+    }, 1000);
+
+    // W key toggles panel
+    window.addEventListener('keydown', e => {
+      if (e.key === 'w' || e.key === 'W') {
+        panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+      }
+    });
   }
 }

@@ -8,6 +8,13 @@ node_modules/
 # Build output
 dist/
 
+# Kenney asset packs (large GLB/PNG — extracted via scripts/extract_kenney_assets.py)
+public/kenney/models/
+!public/kenney/models/custom/.gitkeep
+public/kenney/textures/
+src/texturepacks/
+kenney-zips/
+
 # IDE
 .vscode/
 .idea/

@@ -4,8 +4,10 @@
   "description": "NovaUniverse — Living world explorer for NovaOS agents",
   "type": "module",
   "scripts": {
+    "build:assets": "bash scripts/blender/build.sh",
+    "build:assets:zone": "bash scripts/blender/build.sh --zone",
     "dev": "vite",
-    "build": "vite build",
+    "build": "tsc && vite build",
     "preview": "vite preview"
   },
   "devDependencies": {
