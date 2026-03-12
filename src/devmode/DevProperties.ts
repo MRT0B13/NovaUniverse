@@ -201,8 +201,12 @@ export class DevProperties {
     btn.style.cssText = `
       flex:1; padding:6px; background:${bg}; border:1px solid #444;
       border-radius:4px; color:#ccc; cursor:pointer; font-family:inherit; font-size:10px;
+      pointer-events:auto; touch-action:manipulation; user-select:none;
     `;
-    btn.onclick = onClick;
+    btn.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+    btn.addEventListener('pointerup', (e) => {
+      if (e.pointerType === 'touch') { e.stopPropagation(); onClick(); }
+    });
     return btn;
   }
 }

@@ -813,15 +813,21 @@ export class DevMode {
     const btn = document.createElement('button');
     btn.textContent = text;
     btn.style.cssText = `
-      padding:4px 10px; background:#111; border:1px solid #333; border-radius:4px;
-      color:#aaa; cursor:pointer; font-family:inherit; font-size:10px;
+      padding:6px 12px; background:#111; border:1px solid #333; border-radius:4px;
+      color:#aaa; cursor:pointer; font-family:inherit; font-size:11px;
       transition: border-color 0.15s, color 0.15s;
+      pointer-events:auto; touch-action:manipulation; user-select:none;
+      -webkit-tap-highlight-color:transparent;
     `;
     btn.onmouseenter = () => { btn.style.borderColor = '#00ff88'; btn.style.color = '#fff'; };
     btn.onmouseleave = () => {
       if (!btn.classList.contains('active')) { btn.style.borderColor = '#333'; btn.style.color = '#aaa'; }
     };
-    btn.onclick = onClick;
+    // Use both click and pointerup for reliable touch + mouse
+    btn.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+    btn.addEventListener('pointerup', (e) => {
+      if (e.pointerType === 'touch') { e.stopPropagation(); onClick(); }
+    });
     return btn;
   }
 

@@ -1472,6 +1472,16 @@ export class World3D {
     canvas.addEventListener('mousedown', e => {
       if (this.isDevModeUI(e.target)) return;
       this.lastMouse = { x: e.clientX, y: e.clientY };
+
+      // In DevMode, only right-click/middle/ctrl+click → orbit; left-click belongs to DevMode
+      if (this.devMode?.active) {
+        if (e.button === 2 || e.button === 1 || (e.button === 0 && (e.ctrlKey || e.metaKey))) {
+          this.isOrbiting = true;
+        }
+        // Don't set isDragging — DevMode handles left-click interactions
+        return;
+      }
+
       // Right-click OR Ctrl+left OR middle button → orbit
       if (e.button === 2 || (e.button === 0 && (e.ctrlKey || e.metaKey)) || e.button === 1) {
         this.isOrbiting = true;
@@ -1480,12 +1490,12 @@ export class World3D {
       }
     });
     canvas.addEventListener('mouseup', e => {
-      if (e.button === 0) { this.isDragging = false; this.isOrbiting = false; }
-      if (e.button === 1) this.isOrbiting = false;
-      if (e.button === 2) this.isOrbiting = false;
+      if (e.button === 0 && !this.devMode?.active) this.isDragging = false;
+      if (e.button === 0 && this.devMode?.active) { /* DevMode handles it */ }
+      if (e.button === 1 || e.button === 2) this.isOrbiting = false;
     });
     window.addEventListener('mouseup', () => {
-      this.isDragging = false;
+      if (!this.devMode?.active) this.isDragging = false;
       this.isOrbiting = false;
     });
     // Disable right-click context menu on canvas
@@ -1496,8 +1506,8 @@ export class World3D {
       const dy = e.clientY - this.lastMouse.y;
       this.lastMouse = { x: e.clientX, y: e.clientY };
 
-      // Pan — grab-and-drag: drag right → view moves right → camTarget moves left
-      if (this.isDragging) {
+      // Pan — grab-and-drag (disabled in DevMode — DevMode handles its own drag)
+      if (this.isDragging && !this.devMode?.active) {
         const angle = this.orbitAngle;
         const cosA = Math.cos(angle);
         const sinA = Math.sin(angle);
@@ -1505,14 +1515,14 @@ export class World3D {
         this.camTarget.z -= (-dx * sinA + dy * cosA) * this.panSpeed;
       }
 
-      // Orbit — right-click / ctrl+left / middle drag rotates camera around target
+      // Orbit — right-click / ctrl+left / middle drag rotates camera (works in both modes)
       if (this.isOrbiting) {
         this.orbitAngle -= dx * 0.005;
         this.rebuildOrbitOffset();
       }
     });
 
-    // ── Wheel: zoom (deltaY) + trackpad orbit (deltaX) ──
+    // ── Wheel: zoom (deltaY) + trackpad orbit (deltaX) — works in both modes ──
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
 
@@ -1537,9 +1547,10 @@ export class World3D {
     window.addEventListener('keydown', e => { this.keys.add(e.key); this.handleKeydown(e); });
     window.addEventListener('keyup', e => { this.keys.delete(e.key); });
 
-    // Click to select
+    // Click to select (disabled in DevMode — DevMode handles its own clicks)
     canvas.addEventListener('click', e => {
       if (this.isDevModeUI(e.target)) return;
+      if (this.devMode?.active) return;
       this.handleClick(e, canvas);
     });
 
@@ -1550,12 +1561,13 @@ export class World3D {
       this.lastTouches = Array.from(e.touches).map(t => ({ x: t.clientX, y: t.clientY }));
 
       if (e.touches.length === 2) {
-        // Store initial pinch distance
+        // Store initial pinch distance — works in both modes (always allow zoom/orbit)
         const dx = e.touches[1].clientX - e.touches[0].clientX;
         const dy = e.touches[1].clientY - e.touches[0].clientY;
         this.pinchStartDist = Math.sqrt(dx * dx + dy * dy);
         e.preventDefault(); // prevent browser zoom
-      } else if (e.touches.length === 1) {
+      } else if (e.touches.length === 1 && !this.devMode?.active) {
+        // Single finger pan — only outside DevMode
         this.isDragging = true;
         this.lastMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
       }
@@ -1566,8 +1578,7 @@ export class World3D {
       if (e.touches.length === 0) {
         this.isDragging = false;
         this.isOrbiting = false;
-      } else if (e.touches.length === 1) {
-        // Transitioned from 2-finger to 1-finger: reset to pan
+      } else if (e.touches.length === 1 && !this.devMode?.active) {
         this.isDragging = true;
         this.isOrbiting = false;
         this.lastMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };

@@ -129,14 +129,19 @@ export class DevPalette {
         btn.dataset.category = category;
         btn.dataset.asset = asset;
         btn.style.cssText = `
-          display:block; width:100%; text-align:left; padding:3px 6px; margin:1px 0;
+          display:block; width:100%; text-align:left; padding:5px 8px; margin:1px 0;
           background:transparent; border:1px solid transparent; border-radius:3px;
-          color:#aaa; cursor:pointer; font-family:inherit; font-size:10px;
+          color:#aaa; cursor:pointer; font-family:inherit; font-size:11px;
           transition: background 0.15s, border-color 0.15s;
+          pointer-events:auto; touch-action:manipulation; user-select:none;
+          -webkit-tap-highlight-color:transparent;
         `;
         btn.onmouseenter = () => { if (btn !== this.activeBtn) btn.style.background = '#222'; };
         btn.onmouseleave = () => { if (btn !== this.activeBtn) btn.style.background = 'transparent'; };
-        btn.onclick = () => this.selectAsset(btn, category, asset);
+        btn.addEventListener('click', (e) => { e.stopPropagation(); this.selectAsset(btn, category, asset); });
+        btn.addEventListener('pointerup', (e) => {
+          if ((e as PointerEvent).pointerType === 'touch') { e.stopPropagation(); this.selectAsset(btn, category, asset); }
+        });
         list.appendChild(btn);
       }
 
