@@ -37,7 +37,12 @@ export class DevProperties {
       background:rgba(0,0,0,0.92); border-left:1px solid #333;
       overflow-y:auto; font-family:'Space Mono',monospace; font-size:11px;
       color:#ccc; z-index:1001; padding:8px;
+      pointer-events:auto; touch-action:auto;
     `;
+    // Stop all pointer events from propagating to the canvas behind
+    for (const evt of ['pointerdown', 'pointermove', 'pointerup', 'click', 'mousedown', 'mouseup', 'touchstart', 'touchmove', 'touchend'] as const) {
+      this.el.addEventListener(evt, e => e.stopPropagation());
+    }
 
     const title = document.createElement('div');
     title.textContent = 'PROPERTIES';

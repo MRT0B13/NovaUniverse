@@ -113,8 +113,9 @@ export class DevMode {
 
     // Bind input
     this.onKeyDown = this.onKeyDown.bind(this);
-    this.onClick = this.onClick.bind(this);
-    this.onMouseMove = this.onMouseMove.bind(this);
+    this.onPointerDown = this.onPointerDown.bind(this);
+    this.onPointerMove = this.onPointerMove.bind(this);
+    this.onPointerUp = this.onPointerUp.bind(this);
     window.addEventListener('keydown', this.onKeyDown);
   }
 
@@ -135,10 +136,11 @@ export class DevMode {
     this.gridHelper.position.y = 0.02;
     this.ctx.scene.add(this.gridHelper);
 
-    // Bind canvas events
+    // Bind canvas events — use pointer events for unified mouse+touch
     const canvas = this.ctx.renderer.domElement;
-    canvas.addEventListener('click', this.onClick);
-    canvas.addEventListener('mousemove', this.onMouseMove);
+    canvas.addEventListener('pointerdown', this.onPointerDown);
+    canvas.addEventListener('pointermove', this.onPointerMove);
+    canvas.addEventListener('pointerup', this.onPointerUp);
 
     this.setTool('select');
   }
@@ -161,8 +163,9 @@ export class DevMode {
     this.deselectAll();
 
     const canvas = this.ctx.renderer.domElement;
-    canvas.removeEventListener('click', this.onClick);
-    canvas.removeEventListener('mousemove', this.onMouseMove);
+    canvas.removeEventListener('pointerdown', this.onPointerDown);
+    canvas.removeEventListener('pointermove', this.onPointerMove);
+    canvas.removeEventListener('pointerup', this.onPointerUp);
   }
 
   // ── Tool switching ──────────────────────────────────────────────────────
@@ -228,13 +231,20 @@ export class DevMode {
     this.properties.clearSelection();
   }
 
+  // Pointer drag state (for click vs drag detection + object dragging)
+  private pointerDown = false;
+  private pointerDownPos = { x: 0, y: 0 };
+  private pointerMoved = false;
+  private isDraggingObject = false;
+  private dragObjectId: string | null = null;
+
   // ── Raycasting ──────────────────────────────────────────────────────────
 
-  private getWorldPos(e: MouseEvent): THREE.Vector3 | null {
+  private getWorldPosFromClient(clientX: number, clientY: number): THREE.Vector3 | null {
     const rect = this.ctx.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(
-      ((e.clientX - rect.left) / rect.width) * 2 - 1,
-      ((e.clientY - rect.top) / rect.height) * -2 + 1,
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      ((clientY - rect.top) / rect.height) * -2 + 1,
     );
     this.raycaster.setFromCamera(ndc, this.ctx.camera);
     const target = new THREE.Vector3();
@@ -244,11 +254,11 @@ export class DevMode {
 
   private snap(v: number): number { return Math.round(v * 2) / 2; }
 
-  private hitTest(e: MouseEvent): { type: 'object'; id: string } | { type: 'zone'; key: string } | { type: 'handle'; handle: any } | null {
+  private hitTestFromClient(clientX: number, clientY: number): { type: 'object'; id: string } | { type: 'zone'; key: string } | { type: 'handle'; handle: any } | null {
     const rect = this.ctx.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(
-      ((e.clientX - rect.left) / rect.width) * 2 - 1,
-      ((e.clientY - rect.top) / rect.height) * -2 + 1,
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      ((clientY - rect.top) / rect.height) * -2 + 1,
     );
     this.raycaster.setFromCamera(ndc, this.ctx.camera);
 
@@ -283,14 +293,112 @@ export class DevMode {
     return null;
   }
 
-  // ── Input handlers ──────────────────────────────────────────────────────
+  // ── Pointer handlers (unified mouse + touch) ──────────────────────────
 
-  private onClick = (e: MouseEvent): void => {
+  private onPointerDown = (e: PointerEvent): void => {
     if (!this.active) return;
+    // Ignore non-primary buttons (right-click used for orbit in World3D)
+    if (e.button !== 0) return;
 
+    this.pointerDown = true;
+    this.pointerDownPos = { x: e.clientX, y: e.clientY };
+    this.pointerMoved = false;
+
+    // In select mode, check if we're clicking on an object → prepare for drag
+    if (this.tool === 'select') {
+      const hit = this.hitTestFromClient(e.clientX, e.clientY);
+      if (hit && hit.type === 'object') {
+        this.dragObjectId = hit.id;
+      }
+    }
+  };
+
+  private onPointerMove = (e: PointerEvent): void => {
+    if (!this.active) return;
+    const pos = this.getWorldPosFromClient(e.clientX, e.clientY);
+    if (!pos) return;
+
+    // Check if pointer has moved enough to count as drag (5px threshold)
+    if (this.pointerDown) {
+      const dx = e.clientX - this.pointerDownPos.x;
+      const dy = e.clientY - this.pointerDownPos.y;
+      if (Math.sqrt(dx * dx + dy * dy) > 5) {
+        this.pointerMoved = true;
+
+        // Auto-start move if dragging a selected or hovered object
+        if (this.tool === 'select' && this.dragObjectId && !this.isDraggingObject) {
+          this.select(this.dragObjectId);
+          this.selectedId = this.dragObjectId;
+          this.isDraggingObject = true;
+          this.isTransforming = true;
+          this.tool = 'move';
+          this.updateToolbarHighlight();
+        }
+      }
+    }
+
+    // Ghost preview follows cursor
+    if (this.tool === 'place' && this.ghostModel) {
+      this.ghostModel.position.set(this.snap(pos.x), 0, this.snap(pos.z));
+    }
+
+    // Move tool — drag selected object
+    if (this.tool === 'move' && this.isTransforming && this.selectedId) {
+      const obj = this.objects.get(this.selectedId);
+      if (obj) {
+        const x = this.snap(pos.x);
+        const z = this.snap(pos.z);
+        obj.model.position.set(x, 0, z);
+        obj.data.x = x;
+        obj.data.z = z;
+        this.state.updateObject(this.selectedId, { x, z });
+        this.properties.showObject(obj.data);
+      }
+    }
+
+    // Rotate tool — horizontal mouse movement = Y rotation
+    if (this.tool === 'rotate' && this.isTransforming && this.selectedId) {
+      const obj = this.objects.get(this.selectedId);
+      if (obj) {
+        const dx = pos.x - this.transformStart.x;
+        const rotY = Math.round((dx * 2) / (Math.PI / 4)) * (Math.PI / 4); // snap 45°
+        obj.model.rotation.y = rotY;
+        obj.data.rotY = rotY;
+        this.state.updateObject(this.selectedId, { rotY });
+      }
+    }
+  };
+
+  private onPointerUp = (e: PointerEvent): void => {
+    if (!this.active) return;
+    if (e.button !== 0) return;
+
+    const wasDragging = this.isDraggingObject;
+    const wasMoved = this.pointerMoved;
+
+    // End drag-move
+    if (this.isDraggingObject) {
+      this.isDraggingObject = false;
+      this.isTransforming = false;
+      this.dragObjectId = null;
+      this.setTool('select');
+      this.pointerDown = false;
+      return;
+    }
+
+    this.dragObjectId = null;
+    this.pointerDown = false;
+
+    // If pointer didn't move much, treat as a click
+    if (!wasMoved) {
+      this.handlePointerClick(e.clientX, e.clientY);
+    }
+  };
+
+  private handlePointerClick(clientX: number, clientY: number): void {
     // Placement mode
     if (this.tool === 'place' && this.ghostModel && this.ghostAsset && this.ghostCategory) {
-      const pos = this.getWorldPos(e);
+      const pos = this.getWorldPosFromClient(clientX, clientY);
       if (!pos) return;
       this.placeObject(this.ghostCategory + '/' + this.ghostAsset, this.snap(pos.x), this.snap(pos.z));
       return;
@@ -311,49 +419,13 @@ export class DevMode {
     }
 
     // Select mode
-    const hit = this.hitTest(e);
+    const hit = this.hitTestFromClient(clientX, clientY);
     if (!hit) { this.deselectAll(); return; }
 
     if (hit.type === 'object') {
       this.select(hit.id);
     } else if (hit.type === 'zone') {
       this.selectZone(hit.key);
-    }
-  };
-
-  private onMouseMove = (e: MouseEvent): void => {
-    if (!this.active) return;
-    const pos = this.getWorldPos(e);
-    if (!pos) return;
-
-    // Ghost preview follows cursor
-    if (this.tool === 'place' && this.ghostModel) {
-      this.ghostModel.position.set(this.snap(pos.x), 0, this.snap(pos.z));
-    }
-
-    // Move tool — drag selected object
-    if (this.tool === 'move' && this.isTransforming && this.selectedId) {
-      const obj = this.objects.get(this.selectedId);
-      if (obj) {
-        const x = this.snap(pos.x);
-        const z = this.snap(pos.z);
-        obj.model.position.set(x, 0, z);
-        obj.data.x = x;
-        obj.data.z = z;
-        this.state.updateObject(this.selectedId, { x, z });
-      }
-    }
-
-    // Rotate tool — horizontal mouse movement = Y rotation
-    if (this.tool === 'rotate' && this.isTransforming && this.selectedId) {
-      const obj = this.objects.get(this.selectedId);
-      if (obj) {
-        const dx = pos.x - this.transformStart.x;
-        const rotY = Math.round((dx * 2) / (Math.PI / 4)) * (Math.PI / 4); // snap 45°
-        obj.model.rotation.y = rotY;
-        obj.data.rotY = rotY;
-        this.state.updateObject(this.selectedId, { rotY });
-      }
     }
   };
 
@@ -685,7 +757,12 @@ export class DevMode {
       background:rgba(0,0,0,0.95); border-bottom:2px solid #00ff88;
       display:flex; align-items:center; padding:0 12px; gap:6px;
       font-family:'Space Mono',monospace; z-index:1002;
+      pointer-events:auto; touch-action:auto;
     `;
+    // Stop all pointer events from propagating to the canvas behind
+    for (const evt of ['pointerdown', 'pointermove', 'pointerup', 'click', 'mousedown', 'mouseup', 'touchstart', 'touchmove', 'touchend'] as const) {
+      bar.addEventListener(evt, e => e.stopPropagation());
+    }
 
     // Build mode label
     const label = document.createElement('span');

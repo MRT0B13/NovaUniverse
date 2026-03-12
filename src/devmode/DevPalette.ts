@@ -7,8 +7,8 @@
 const ASSET_CATALOG: Record<string, string[]> = {
   // ── Custom Blender hero assets ──
   custom: [
-    'agora-plaza','burn-furnace','data-pillar','guard-tower','launch-pad',
-    'lp-pool','nova-hq','nova-tower','rocket','satellite-array',
+    'agora-plaza','burn-furnace','crypto-atm','data-pillar','guard-tower','launch-pad',
+    'lp-pool','nova-bank','nova-hq','nova-tower','rocket','satellite-array',
   ],
   // ── Commercial (Kenney City) ──
   commercial: [
@@ -95,7 +95,12 @@ export class DevPalette {
       overflow-y:auto; font-family:'Space Mono',monospace; font-size:11px;
       color:#ccc; z-index:1001; padding:8px;
       scrollbar-width:thin; scrollbar-color:#444 transparent;
+      pointer-events:auto; touch-action:auto;
     `;
+    // Stop all pointer events from propagating to the canvas behind
+    for (const evt of ['pointerdown', 'pointermove', 'pointerup', 'click', 'mousedown', 'mouseup', 'touchstart', 'touchmove', 'touchend'] as const) {
+      this.el.addEventListener(evt, e => e.stopPropagation());
+    }
 
     const title = document.createElement('div');
     title.textContent = 'ASSET PALETTE';

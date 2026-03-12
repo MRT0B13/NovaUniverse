@@ -146,8 +146,11 @@ export class World3D {
   private camOffset = new THREE.Vector3(0, CAM_HEIGHT, CAM_HEIGHT * 0.8);
   private camOffsetSmooth = new THREE.Vector3(0, CAM_HEIGHT * 1.3, CAM_HEIGHT * 1.1);
   private isDragging = false;
+  private isOrbiting = false;  // right-click orbit
   private lastMouse = { x: 0, y: 0 };
   private panSpeed = 0.05;
+  private orbitAngle = 0;       // current orbit angle in radians
+  private orbitRadius = 0;      // computed from camOffset
   private keys = new Set<string>();
 
   // Raycasting for click detection
@@ -1445,28 +1448,89 @@ export class World3D {
     this.updateCamera();
   }
 
+  // Touch state for multi-touch gestures
+  private touchCount = 0;
+  private lastTouches: Array<{ x: number; y: number }> = [];
+  private pinchStartDist = 0;
+
+  /** Check if an event target is inside a DevMode UI panel */
+  private isDevModeUI(target: EventTarget | null): boolean {
+    if (!target || !(target instanceof HTMLElement)) return false;
+    return !!(
+      target.closest('#dev-toolbar') ||
+      target.closest('#dev-palette') ||
+      target.closest('#dev-properties')
+    );
+  }
+
   private setupControls(canvas: HTMLCanvasElement) {
-    // Mouse drag to pan
+    // Compute initial orbit state from camOffset
+    this.orbitRadius = Math.sqrt(this.camOffset.x ** 2 + this.camOffset.z ** 2);
+    this.orbitAngle = Math.atan2(this.camOffset.x, this.camOffset.z);
+
+    // ── Mouse down — left = pan, right/ctrl+left/middle = orbit ──
     canvas.addEventListener('mousedown', e => {
-      if (e.button === 0) { this.isDragging = true; this.lastMouse = { x: e.clientX, y: e.clientY }; }
+      if (this.isDevModeUI(e.target)) return;
+      this.lastMouse = { x: e.clientX, y: e.clientY };
+      // Right-click OR Ctrl+left OR middle button → orbit
+      if (e.button === 2 || (e.button === 0 && (e.ctrlKey || e.metaKey)) || e.button === 1) {
+        this.isOrbiting = true;
+      } else if (e.button === 0) {
+        this.isDragging = true;
+      }
     });
-    canvas.addEventListener('mouseup', () => { this.isDragging = false; });
+    canvas.addEventListener('mouseup', e => {
+      if (e.button === 0) { this.isDragging = false; this.isOrbiting = false; }
+      if (e.button === 1) this.isOrbiting = false;
+      if (e.button === 2) this.isOrbiting = false;
+    });
+    window.addEventListener('mouseup', () => {
+      this.isDragging = false;
+      this.isOrbiting = false;
+    });
+    // Disable right-click context menu on canvas
+    canvas.addEventListener('contextmenu', e => e.preventDefault());
+
     canvas.addEventListener('mousemove', e => {
-      if (!this.isDragging) return;
       const dx = e.clientX - this.lastMouse.x;
       const dy = e.clientY - this.lastMouse.y;
-      this.camTarget.x += dx * this.panSpeed;
-      this.camTarget.z += dy * this.panSpeed;
       this.lastMouse = { x: e.clientX, y: e.clientY };
+
+      // Pan — grab-and-drag: drag right → view moves right → camTarget moves left
+      if (this.isDragging) {
+        const angle = this.orbitAngle;
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+        this.camTarget.x -= (dx * cosA + dy * sinA) * this.panSpeed;
+        this.camTarget.z -= (-dx * sinA + dy * cosA) * this.panSpeed;
+      }
+
+      // Orbit — right-click / ctrl+left / middle drag rotates camera around target
+      if (this.isOrbiting) {
+        this.orbitAngle -= dx * 0.005;
+        this.rebuildOrbitOffset();
+      }
     });
 
-    // Scroll to zoom (scroll up = zoom in, scroll down = zoom out)
+    // ── Wheel: zoom (deltaY) + trackpad orbit (deltaX) ──
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
-      this.camOffset.multiplyScalar(e.deltaY > 0 ? 1.1 : 0.9);
-      this.camOffset.y = Math.max(5, Math.min(50, this.camOffset.y));
-      this.camOffset.z = Math.max(3, Math.min(45, this.camOffset.z));
-      this.updateCamera();
+
+      // Trackpad horizontal scroll → orbit rotation
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY) * 0.5 && Math.abs(e.deltaX) > 2) {
+        this.orbitAngle -= e.deltaX * 0.003;
+        this.rebuildOrbitOffset();
+      }
+
+      // Vertical scroll → zoom
+      if (Math.abs(e.deltaY) > 1) {
+        const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
+        this.camOffset.multiplyScalar(zoomFactor);
+        this.camOffset.y = Math.max(5, Math.min(50, this.camOffset.y));
+        this.orbitRadius = Math.sqrt(this.camOffset.x ** 2 + this.camOffset.z ** 2);
+        this.rebuildOrbitOffset();
+        this.updateCamera();
+      }
     }, { passive: false });
 
     // Keyboard
@@ -1474,23 +1538,105 @@ export class World3D {
     window.addEventListener('keyup', e => { this.keys.delete(e.key); });
 
     // Click to select
-    canvas.addEventListener('click', e => this.handleClick(e, canvas));
+    canvas.addEventListener('click', e => {
+      if (this.isDevModeUI(e.target)) return;
+      this.handleClick(e, canvas);
+    });
 
-    // Touch support
+    // ── Touch support — 1 finger = pan, 2 fingers = pinch zoom + rotate ──
     canvas.addEventListener('touchstart', e => {
-      const t = e.touches[0];
-      this.isDragging = true;
-      this.lastMouse = { x: t.clientX, y: t.clientY };
+      if (this.isDevModeUI(e.target as EventTarget)) return;
+      this.touchCount = e.touches.length;
+      this.lastTouches = Array.from(e.touches).map(t => ({ x: t.clientX, y: t.clientY }));
+
+      if (e.touches.length === 2) {
+        // Store initial pinch distance
+        const dx = e.touches[1].clientX - e.touches[0].clientX;
+        const dy = e.touches[1].clientY - e.touches[0].clientY;
+        this.pinchStartDist = Math.sqrt(dx * dx + dy * dy);
+        e.preventDefault(); // prevent browser zoom
+      } else if (e.touches.length === 1) {
+        this.isDragging = true;
+        this.lastMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', e => {
+      this.touchCount = e.touches.length;
+      if (e.touches.length === 0) {
+        this.isDragging = false;
+        this.isOrbiting = false;
+      } else if (e.touches.length === 1) {
+        // Transitioned from 2-finger to 1-finger: reset to pan
+        this.isDragging = true;
+        this.isOrbiting = false;
+        this.lastMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        this.lastTouches = [{ x: e.touches[0].clientX, y: e.touches[0].clientY }];
+      }
     });
-    canvas.addEventListener('touchend', () => { this.isDragging = false; });
+
     canvas.addEventListener('touchmove', e => {
-      const t = e.touches[0];
-      const dx = t.clientX - this.lastMouse.x;
-      const dy = t.clientY - this.lastMouse.y;
-      this.camTarget.x += dx * this.panSpeed;
-      this.camTarget.z += dy * this.panSpeed;
-      this.lastMouse = { x: t.clientX, y: t.clientY };
-    });
+      if (this.isDevModeUI(e.target as EventTarget)) return;
+
+      if (e.touches.length === 1 && this.isDragging) {
+        // Single finger — pan
+        const t = e.touches[0];
+        const dx = t.clientX - this.lastMouse.x;
+        const dy = t.clientY - this.lastMouse.y;
+        this.lastMouse = { x: t.clientX, y: t.clientY };
+        const angle = this.orbitAngle;
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+        this.camTarget.x -= (dx * cosA + dy * sinA) * this.panSpeed;
+        this.camTarget.z -= (-dx * sinA + dy * cosA) * this.panSpeed;
+      } else if (e.touches.length === 2) {
+        e.preventDefault();
+        const t0 = e.touches[0], t1 = e.touches[1];
+
+        // Pinch zoom
+        const dx = t1.clientX - t0.clientX;
+        const dy = t1.clientY - t0.clientY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (this.pinchStartDist > 0) {
+          const scale = this.pinchStartDist / dist;
+          // Only zoom if significant change
+          if (Math.abs(scale - 1) > 0.01) {
+            const factor = 1 + (scale - 1) * 0.3; // dampen
+            this.camOffset.multiplyScalar(factor);
+            this.camOffset.y = Math.max(5, Math.min(50, this.camOffset.y));
+            this.orbitRadius = Math.sqrt(this.camOffset.x ** 2 + this.camOffset.z ** 2);
+            this.rebuildOrbitOffset();
+            this.updateCamera();
+          }
+        }
+        this.pinchStartDist = dist;
+
+        // Two-finger rotation — track midpoint horizontal movement
+        if (this.lastTouches.length >= 2) {
+          const prevMidX = (this.lastTouches[0].x + this.lastTouches[1].x) / 2;
+          const currMidX = (t0.clientX + t1.clientX) / 2;
+          const midDx = currMidX - prevMidX;
+          // Only orbit if both fingers move in the same direction horizontally
+          const dx0 = t0.clientX - this.lastTouches[0].x;
+          const dx1 = t1.clientX - this.lastTouches[1].x;
+          if (Math.sign(dx0) === Math.sign(dx1) && Math.abs(midDx) > 1) {
+            this.orbitAngle -= midDx * 0.004;
+            this.rebuildOrbitOffset();
+          }
+        }
+
+        this.lastTouches = [
+          { x: t0.clientX, y: t0.clientY },
+          { x: t1.clientX, y: t1.clientY },
+        ];
+      }
+    }, { passive: false });
+  }
+
+  /** Recalculate camOffset X/Z from orbit angle + radius (Y stays the same) */
+  private rebuildOrbitOffset(): void {
+    this.camOffset.x = Math.sin(this.orbitAngle) * this.orbitRadius;
+    this.camOffset.z = Math.cos(this.orbitAngle) * this.orbitRadius;
   }
 
   private handleKeydown(e: KeyboardEvent) {
