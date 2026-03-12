@@ -172,7 +172,7 @@ export class World3D {
     // Scene
     this.threeScene = new THREE.Scene();
     this.threeScene.background = new THREE.Color(skyColor);
-    this.fog = new THREE.FogExp2(skyColor, 0.008);
+    this.fog = new THREE.FogExp2(skyColor, 0.003);
     this.threeScene.fog = this.fog;
 
     // Camera
@@ -1625,6 +1625,9 @@ export class World3D {
 
   tick() {
     const delta = this.clock.getDelta(); // ONLY call once per frame
+
+    // Feed camera height so fog thins when zoomed out
+    this.weather.setCameraHeight(this.camOffsetSmooth.y);
 
     // Update weather system (time of day + rain + lightning)
     this.weather.update(delta);
