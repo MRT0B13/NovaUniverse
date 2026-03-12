@@ -9,6 +9,7 @@ import { ZoneLayout } from './ZoneLayout';
 import { CollisionWorld } from './CollisionWorld';
 import { WeatherSystem } from './WeatherSystem';
 import type { WeatherState } from './WeatherSystem';
+import { DevMode } from '../devmode/DevMode';
 import { apiFetch } from '../utils/auth';
 import type { HUD } from '../ui/HUD';
 import type { UniverseEvent } from '../events/EventClient';
@@ -164,6 +165,9 @@ export class World3D {
   private vehicles: VehicleObject3D[] = [];
 
   private sceneReady = false;
+
+  // Dev mode (Sims-style build mode)
+  private devMode: DevMode | null = null;
 
   // Agent idle roaming — each agent gets a countdown until next roam
   private agentRoamTimers = new Map<string, number>();
@@ -995,6 +999,26 @@ export class World3D {
     );
     // Start with overcast as default (matches NovaOS dark aesthetic)
     this.weather.setWeather('overcast');
+
+    // Initialize Dev Mode (Sims-style build mode, toggle with B)
+    this.devMode = new DevMode({
+      scene: this.threeScene,
+      camera: this.camera,
+      renderer: this.renderer,
+      loader: this.loader,
+      texLoader: this.texLoader,
+    });
+    // Initialize zone state from current config
+    const zoneLabels: Record<string, string> = {};
+    const zoneIcons: Record<string, string> = {};
+    for (const [key, z] of Object.entries(ZONES)) {
+      zoneLabels[key] = z.label;
+      zoneIcons[key] = z.icon;
+    }
+    this.devMode.initZoneState(ZONE_3D, ZONE_COLORS, zoneLabels, zoneIcons);
+    // Load any saved placements
+    await this.devMode.loadSavedState();
+    console.log('[World3D] Dev mode initialized (press B to toggle)');
   }
 
   private async loadZoneBuildings(bump: () => void) {
@@ -1484,6 +1508,9 @@ export class World3D {
   }
 
   private handleClick(e: MouseEvent, canvas: HTMLCanvasElement) {
+    // Dev mode handles its own clicks
+    if (this.devMode?.active) return;
+
     const rect = canvas.getBoundingClientRect();
     const ndc = new THREE.Vector2(
       ((e.clientX - rect.left) / rect.width)  *  2 - 1,
@@ -1660,7 +1687,8 @@ export class World3D {
     // Update animation mixers
     for (const m of this.mixers) m.update(delta);
 
-    // Agent idle roaming — periodically walk to random point in home zone
+    // Agent idle roaming — periodically walk to random point in home zone (paused in dev mode)
+    if (!this.devMode?.active)
     for (const [agentId, agent] of this.agents) {
       if (!agent.state.isWalking) {
         const remaining = (this.agentRoamTimers.get(agentId) ?? 0) - delta;
