@@ -15,33 +15,33 @@ interface WeatherConfig {
 
 const WEATHER_CONFIGS: Record<WeatherState, WeatherConfig> = {
   clear: {
-    fogDensity: 0.008, ambientIntensity: 1.2, ambientColor: 0x334466,
+    fogDensity: 0.008, ambientIntensity: 1.4, ambientColor: 0x334466,
     sunIntensity: 2.5, sunColor: 0xfff8e8, rainRate: 0, windX: 0, windZ: 0,
   },
   overcast: {
-    fogDensity: 0.018, ambientIntensity: 0.9, ambientColor: 0x445566,
-    sunIntensity: 0.8, sunColor: 0xaabbcc, rainRate: 0, windX: 0.001, windZ: 0,
+    fogDensity: 0.015, ambientIntensity: 1.1, ambientColor: 0x445566,
+    sunIntensity: 1.0, sunColor: 0xaabbcc, rainRate: 0, windX: 0.001, windZ: 0,
   },
   rain: {
-    fogDensity: 0.03,  ambientIntensity: 0.6, ambientColor: 0x334455,
-    sunIntensity: 0.4, sunColor: 0x8899aa, rainRate: 200, windX: 0.003, windZ: 0.001,
+    fogDensity: 0.022, ambientIntensity: 0.9, ambientColor: 0x334455,
+    sunIntensity: 0.6, sunColor: 0x8899aa, rainRate: 200, windX: 0.003, windZ: 0.001,
   },
   storm: {
-    fogDensity: 0.055, ambientIntensity: 0.3, ambientColor: 0x223344,
-    sunIntensity: 0.1, sunColor: 0x667788, rainRate: 600, windX: 0.008, windZ: 0.003,
+    fogDensity: 0.035, ambientIntensity: 0.75, ambientColor: 0x223344,
+    sunIntensity: 0.3, sunColor: 0x667788, rainRate: 600, windX: 0.008, windZ: 0.003,
   },
 };
 
 // Time of day light colours (hour 0-23)
 const DAY_CYCLE: Array<{ hour: number; ambient: number; sun: number; intensity: number }> = [
-  { hour:  0, ambient: 0x111122, sun: 0x222244, intensity: 0.1 },  // midnight
-  { hour:  5, ambient: 0x221133, sun: 0x553322, intensity: 0.3 },  // pre-dawn
-  { hour:  7, ambient: 0x334466, sun: 0xff8844, intensity: 1.2 },  // dawn
-  { hour: 10, ambient: 0x334466, sun: 0xfff0cc, intensity: 2.0 },  // morning
-  { hour: 14, ambient: 0x334466, sun: 0xfff8e8, intensity: 2.5 },  // noon
-  { hour: 18, ambient: 0x443322, sun: 0xff6633, intensity: 1.8 },  // dusk
-  { hour: 20, ambient: 0x221133, sun: 0x552244, intensity: 0.5 },  // evening
-  { hour: 23, ambient: 0x111122, sun: 0x222244, intensity: 0.1 },  // night
+  { hour:  0, ambient: 0x2a2a55, sun: 0x4466aa, intensity: 0.9 },  // midnight — cool blue moonlight
+  { hour:  5, ambient: 0x332244, sun: 0x885533, intensity: 1.0 },  // pre-dawn
+  { hour:  7, ambient: 0x446688, sun: 0xff8844, intensity: 1.6 },  // dawn
+  { hour: 10, ambient: 0x556688, sun: 0xfff0cc, intensity: 2.2 },  // morning
+  { hour: 14, ambient: 0x446688, sun: 0xfff8e8, intensity: 2.5 },  // noon
+  { hour: 18, ambient: 0x554433, sun: 0xff6633, intensity: 1.8 },  // dusk
+  { hour: 20, ambient: 0x332244, sun: 0x664488, intensity: 1.1 },  // evening
+  { hour: 23, ambient: 0x2a2a55, sun: 0x4466aa, intensity: 0.9 },  // late night
 ];
 
 export class WeatherSystem {
@@ -63,8 +63,8 @@ export class WeatherSystem {
   private transitionDur = 8; // seconds
 
   // Time of day (0-24, advances in real time at configurable speed)
-  private timeOfDay = 14;   // start at noon
-  private readonly REAL_SECONDS_PER_GAME_HOUR = 120; // 2 min real = 1 game hour
+  private timeOfDay = 10;   // start at 10am
+  private readonly REAL_SECONDS_PER_GAME_HOUR = 600; // 10 min real = 1 game hour
 
   // Lightning (storm only)
   private lightningLight: THREE.PointLight;
@@ -140,7 +140,8 @@ export class WeatherSystem {
     this.sun.color.lerpColors(
       new THREE.Color(before.sun), new THREE.Color(after.sun), ease
     );
-    this.sun.intensity = before.intensity + (after.intensity - before.intensity) * ease;
+    const rawIntensity = before.intensity + (after.intensity - before.intensity) * ease;
+    this.sun.intensity = rawIntensity * this._weatherSunMultiplier;
 
     // Sun position arc
     const sunAngle = ((h - 6) / 12) * Math.PI; // rises at 6, sets at 18
@@ -153,27 +154,38 @@ export class WeatherSystem {
 
   // ── Weather blend ───────────────────────────────────────────────────────
 
+  private _weatherSunMultiplier = 1.0;
+
   private applyWeatherBlend() {
     const from = WEATHER_CONFIGS[this.currentWeather];
     const to   = WEATHER_CONFIGS[this.targetWeather];
     const t = this.transitionT;
 
     const lerpN = (a: number, b: number) => a + (b - a) * t;
-    const lerpC = (a: number, b: number) => {
-      const ca = new THREE.Color(a), cb = new THREE.Color(b);
-      return ca.lerp(cb, t);
-    };
 
+    // Fog
     this.fog.density = lerpN(from.fogDensity, to.fogDensity);
-    this.ambient.intensity = lerpN(from.ambientIntensity, to.ambientIntensity);
-    this.ambient.color.copy(lerpC(from.ambientColor, to.ambientColor));
-    // Don't override sun colour here — day cycle owns it, just modulate intensity
-    this.sun.intensity *= lerpN(1, to.sunIntensity / Math.max(from.sunIntensity, 0.01));
+
+    // Ambient — hard floor of 0.7 so world is never unreadable (especially at night)
+    this.ambient.intensity = Math.max(0.7, lerpN(from.ambientIntensity, to.ambientIntensity));
+    this.ambient.color.set(new THREE.Color(from.ambientColor).lerp(new THREE.Color(to.ambientColor), t));
+
+    // Sun intensity — SET via multiplier, do NOT multiply existing value
+    const weatherSunFactor = lerpN(from.sunIntensity / 2.5, to.sunIntensity / 2.5);
+    this._weatherSunMultiplier = Math.max(0.25, weatherSunFactor);
+
+    // Fog/sky colour — match so distant objects fade into sky, brighter at night
+    const skyFrom = this.currentWeather === 'clear' ? 0x1a1a2e : 0x141428;
+    const skyTo   = this.targetWeather  === 'clear' ? 0x1a1a2e : 0x141428;
+    const skyColor = new THREE.Color(skyFrom).lerp(new THREE.Color(skyTo), t);
+    this.fog.color.copy(skyColor);
+    if (this.scene.background instanceof THREE.Color) {
+      (this.scene.background as THREE.Color).copy(skyColor);
+    }
 
     // Show/hide rain particles based on rate
     if (this.rain) {
-      const targetRate = lerpN(from.rainRate, to.rainRate);
-      this.rain.visible = targetRate > 10;
+      this.rain.visible = lerpN(from.rainRate, to.rainRate) > 10;
     }
 
     if (t >= 1) this.currentWeather = this.targetWeather;
@@ -267,5 +279,49 @@ export class WeatherSystem {
       // Schedule next strike (4-15 seconds)
       this.lightningTimer = 4 + Math.random() * 11;
     }
+  }
+
+  // ── Sky uniform update (called by World3D tick) ─────────────────────────
+
+  updateSky(skyUniforms: { topColor: THREE.IUniform; bottomColor: THREE.IUniform }) {
+    const h = this.timeOfDay;
+    // Night: dark blues, Dawn/dusk: warm low horizon, Day: sky blue
+    let topR: number, topG: number, topB: number;
+    let botR: number, botG: number, botB: number;
+
+    if (h < 5 || h > 20) {
+      // Night — atmospheric deep blue, never black (cyberpunk city vibe)
+      topR = 0.04; topG = 0.05;  topB = 0.14;
+      botR = 0.06; botG = 0.06;  botB = 0.12;
+    } else if (h < 7) {
+      // Dawn
+      const t = (h - 5) / 2;
+      topR = THREE.MathUtils.lerp(0.04, 0.15, t);
+      topG = THREE.MathUtils.lerp(0.05, 0.25, t);
+      topB = THREE.MathUtils.lerp(0.14, 0.45, t);
+      botR = THREE.MathUtils.lerp(0.06, 0.35, t);
+      botG = THREE.MathUtils.lerp(0.06, 0.18, t);
+      botB = THREE.MathUtils.lerp(0.12, 0.10, t);
+    } else if (h < 17) {
+      // Day
+      topR = 0.15; topG = 0.30; topB = 0.55;
+      botR = 0.40; botG = 0.50; botB = 0.60;
+    } else {
+      // Dusk
+      const t = (h - 17) / 3;
+      topR = THREE.MathUtils.lerp(0.15, 0.04, t);
+      topG = THREE.MathUtils.lerp(0.30, 0.05, t);
+      topB = THREE.MathUtils.lerp(0.55, 0.14, t);
+      botR = THREE.MathUtils.lerp(0.40, 0.06, t);
+      botG = THREE.MathUtils.lerp(0.50, 0.06, t);
+      botB = THREE.MathUtils.lerp(0.60, 0.12, t);
+    }
+
+    // Weather overcast/storm darkens the sky
+    const wCfg = WEATHER_CONFIGS[this.currentWeather];
+    const darkFactor = wCfg.fogDensity > 0.02 ? 0.4 : 1.0;
+
+    (skyUniforms.topColor.value as THREE.Color).setRGB(topR * darkFactor, topG * darkFactor, topB * darkFactor);
+    (skyUniforms.bottomColor.value as THREE.Color).setRGB(botR * darkFactor, botG * darkFactor, botB * darkFactor);
   }
 }

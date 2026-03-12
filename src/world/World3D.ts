@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { ZONES, AGENT_DEFS, WORLD_WIDTH, WORLD_HEIGHT, ACTION_ZONE_MAP } from '../config/constants';
 import { AgentObject3D } from './AgentObject3D';
+import { VehicleObject3D } from './VehicleObject3D';
 import { CityPopulator } from './CityPopulator';
 import { AmbientLife } from './AmbientLife';
 import { ZoneLayout } from './ZoneLayout';
@@ -29,6 +30,7 @@ const ZONE_BUILDINGS: Record<string, { dir: string; files: string[]; count: numb
   agora:          { dir: 'suburban',    files: ['building-type-a','building-type-b','building-type-c','building-type-d','tree-large','tree-small'], count: 5 },
   orca_pool:      { dir: 'commercial',  files: ['low-detail-building-a','low-detail-building-b','low-detail-building-d','low-detail-building-e'], count: 4 },
   burn_furnace:   { dir: 'industrial',  files: ['chimney-large','chimney-small','chimney-basic','detail-tank','building-d','building-e'], count: 5 },
+  nova_bank:      { dir: 'commercial',  files: ['building-a','building-b','building-c','building-d','low-detail-building-a'], count: 4 },
 };
 
 
@@ -52,7 +54,48 @@ const ZONE_COLORS: Record<string, number> = {
   watchtower:    0xff9500, command_center: 0xc084fc,
   launchpad:     0xf472b6, agora:         0xffd700,
   orca_pool:     0x00ff88, burn_furnace:  0xff4444,
+  nova_bank:     0xffd700,
 };
+
+// ── 3D Zone positions (hand-tuned, no SCALE conversion) ──────────────────────
+export const ZONE_3D: Record<string, { cx: number; cz: number; w: number; h: number }> = {
+  trading_floor:  { cx: -6,    cz: -4,    w: 4.2,  h: 3.2 },
+  intel_hub:      { cx:  0,    cz: -5,    w: 3.6,  h: 2.8 },
+  watchtower:     { cx:  6,    cz: -4.5,  w: 3.0,  h: 2.6 },
+  command_center: { cx:  0,    cz:  0,    w: 3.8,  h: 3.0 },
+  launchpad:      { cx: -6,    cz:  2,    w: 3.6,  h: 2.8 },
+  agora:          { cx:  6,    cz:  1,    w: 3.2,  h: 2.6 },
+  orca_pool:      { cx: -8.2,  cz: -2,    w: 2.0,  h: 1.6 },
+  burn_furnace:   { cx:  6,    cz:  4,    w: 2.6,  h: 2.0 },
+  nova_bank:      { cx: -8.2,  cz:  4,    w: 2.8,  h: 2.2 },
+};
+
+// ── Roads between zones (each segment = [start, end]) ────────────────────────
+const ROAD_SEGMENTS: Array<[THREE.Vector2, THREE.Vector2]> = [
+  // horizontal links
+  [new THREE.Vector2(-6, -4),   new THREE.Vector2(0, -4)],    // trading → intel
+  [new THREE.Vector2(0, -4.5),  new THREE.Vector2(6, -4.5)],  // intel → watchtower
+  [new THREE.Vector2(-6, 0),    new THREE.Vector2(0, 0)],     // launchpad row → command
+  [new THREE.Vector2(0, 0),     new THREE.Vector2(6, 0)],     // command → agora
+  [new THREE.Vector2(-8.2, -2), new THREE.Vector2(-6, -2)],   // orca → trading approach
+  [new THREE.Vector2(6, 2.5),   new THREE.Vector2(6, 4)],     // agora → burn (vertical)
+  // vertical links
+  [new THREE.Vector2(-6, -4),   new THREE.Vector2(-6, 2)],    // trading → launchpad
+  [new THREE.Vector2(0, -5),    new THREE.Vector2(0, 0)],     // intel → command
+  [new THREE.Vector2(6, -4.5),  new THREE.Vector2(6, 1)],     // watchtower → agora
+];
+
+// ── Vehicle patrol paths (loop waypoints along roads) ─────────────────────────
+const ROAD_PATHS_3D: THREE.Vector3[][] = [
+  // Loop 1: trading → intel → command → launchpad
+  [new THREE.Vector3(-6, 0, -4), new THREE.Vector3(0, 0, -4), new THREE.Vector3(0, 0, 0), new THREE.Vector3(-6, 0, 2), new THREE.Vector3(-6, 0, -4)],
+  // Loop 2: intel → watchtower → agora → command
+  [new THREE.Vector3(0, 0, -4.5), new THREE.Vector3(6, 0, -4.5), new THREE.Vector3(6, 0, 1), new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -4.5)],
+  // Loop 3: orca → trading short
+  [new THREE.Vector3(-8.2, 0, -2), new THREE.Vector3(-6, 0, -2), new THREE.Vector3(-6, 0, -4), new THREE.Vector3(-8.2, 0, -2)],
+  // Loop 4: agora → burn short
+  [new THREE.Vector3(6, 0, 1), new THREE.Vector3(6, 0, 4), new THREE.Vector3(6, 0, 1)],
+];
 
 // ════════════════════════════════════════════════════════════════════════════════
 //  World3D — main Three.js world
@@ -84,9 +127,11 @@ export class World3D {
   private ambient!: THREE.AmbientLight;
   private fog!: THREE.FogExp2;
 
-  // Camera control state
+  // Camera control state — start focused on Command Center
   private camTarget = new THREE.Vector3(0, 0, 0);
+  private camTargetSmooth = new THREE.Vector3(0, 0, 0);
   private camOffset = new THREE.Vector3(0, CAM_HEIGHT, CAM_HEIGHT * 0.8);
+  private camOffsetSmooth = new THREE.Vector3(0, CAM_HEIGHT * 1.3, CAM_HEIGHT * 1.1);
   private isDragging = false;
   private lastMouse = { x: 0, y: 0 };
   private panSpeed = 0.05;
@@ -99,7 +144,18 @@ export class World3D {
   // Fallback building geometry (used if GLB not found)
   private fallbackGeo = new THREE.BoxGeometry(0.6, 1.2, 0.6);
 
+  // Zone identity
+  private zoneLights = new Map<string, THREE.PointLight>();
+  private zoneEdgeMats: THREE.MeshStandardMaterial[] = [];
+  private zoneLabels: THREE.Sprite[] = [];
+  private skyUniforms: { topColor: THREE.IUniform; bottomColor: THREE.IUniform } | null = null;
+  private vehicles: VehicleObject3D[] = [];
+
   private sceneReady = false;
+
+  // Zone ambient particle systems
+  private burnEmbers: { points: THREE.Points; velocities: Float32Array } | null = null;
+  private launchSparks: { points: THREE.Points; velocities: Float32Array } | null = null;
 
   // ── Constructor ─────────────────────────────────────────────────────────────
 
@@ -110,11 +166,13 @@ export class World3D {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    this.renderer.setClearColor(0x0a0a0f);
+    const skyColor = 0x1a1a2e;
+    this.renderer.setClearColor(skyColor);
 
     // Scene
     this.threeScene = new THREE.Scene();
-    this.fog = new THREE.FogExp2(0x0a0c14, 0.012);
+    this.threeScene.background = new THREE.Color(skyColor);
+    this.fog = new THREE.FogExp2(skyColor, 0.008);
     this.threeScene.fog = this.fog;
 
     // Camera
@@ -192,24 +250,16 @@ export class World3D {
     const gctx = groundCanvas.getContext('2d')!;
 
     // Base dark asphalt
-    gctx.fillStyle = '#1a1c22';
+    gctx.fillStyle = '#0e0f14';
     gctx.fillRect(0, 0, 512, 512);
 
     // Subtle noise for asphalt texture
-    for (let i = 0; i < 8000; i++) {
+    for (let i = 0; i < 10000; i++) {
       const nx = Math.random() * 512;
       const ny = Math.random() * 512;
-      const brightness = 20 + Math.floor(Math.random() * 15);
-      gctx.fillStyle = `rgb(${brightness},${brightness + 2},${brightness + 5})`;
+      const brightness = 12 + Math.floor(Math.random() * 10);
+      gctx.fillStyle = `rgb(${brightness},${brightness + 1},${brightness + 3})`;
       gctx.fillRect(nx, ny, 1 + Math.random() * 2, 1 + Math.random() * 2);
-    }
-
-    // Faint grid lines every 32px
-    gctx.strokeStyle = 'rgba(60,65,80,0.15)';
-    gctx.lineWidth = 1;
-    for (let i = 0; i < 512; i += 32) {
-      gctx.beginPath(); gctx.moveTo(i, 0); gctx.lineTo(i, 512); gctx.stroke();
-      gctx.beginPath(); gctx.moveTo(0, i); gctx.lineTo(512, i); gctx.stroke();
     }
 
     const groundTex = new THREE.CanvasTexture(groundCanvas);
@@ -227,15 +277,14 @@ export class World3D {
     ground.receiveShadow = true;
     this.threeScene.add(ground);
 
-    // === Subtle grid overlay (dimmer) ===
-    const gridHelper = new THREE.GridHelper(60, 60, 0x222233, 0x16161e);
-    gridHelper.position.y = 0.015;
-    gridHelper.material.opacity = 0.3;
-    (gridHelper.material as THREE.Material).transparent = true;
-    this.threeScene.add(gridHelper);
-
     // Zone floor pads + borders + accent lights
     this.addZonePads();
+
+    // Zone-specific ground treatments and themed props
+    this.buildZoneDetails();
+
+    // Roads between zones
+    this.addRoadStripes();
 
     // === Sky dome (gradient hemisphere) ===
     this.buildSkyDome();
@@ -244,28 +293,35 @@ export class World3D {
     this.buildAtmosphere();
   }
 
-  /** Gradient sky dome so the background isn't flat black */
+  /** Shader-based sky dome with day/night uniforms */
   private buildSkyDome() {
     const skyGeo = new THREE.SphereGeometry(90, 32, 16);
-    // Vertex colours: dark blue at top → dark purple at horizon
-    const colours = new Float32Array(skyGeo.attributes.position.count * 3);
-    const pos = skyGeo.attributes.position;
-    for (let i = 0; i < pos.count; i++) {
-      const y = pos.getY(i);
-      const t = THREE.MathUtils.clamp((y + 90) / 180, 0, 1); // 0 = bottom, 1 = top
-      // Bottom: dark ground color → Top: deep night sky
-      const r = THREE.MathUtils.lerp(0.04, 0.03, t);
-      const g = THREE.MathUtils.lerp(0.04, 0.04, t);
-      const b = THREE.MathUtils.lerp(0.06, 0.10, t);
-      colours[i * 3]     = r;
-      colours[i * 3 + 1] = g;
-      colours[i * 3 + 2] = b;
-    }
-    skyGeo.setAttribute('color', new THREE.BufferAttribute(colours, 3));
-    const skyMat = new THREE.MeshBasicMaterial({
-      vertexColors: true,
+    this.skyUniforms = {
+      topColor:    { value: new THREE.Color(0x040610) },
+      bottomColor: { value: new THREE.Color(0x0a0a14) },
+    };
+    const skyMat = new THREE.ShaderMaterial({
+      uniforms: this.skyUniforms,
+      vertexShader: `
+        varying vec3 vWorldPosition;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldPosition = wp.xyz;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 topColor;
+        uniform vec3 bottomColor;
+        varying vec3 vWorldPosition;
+        void main() {
+          float h = normalize(vWorldPosition).y;
+          float t = clamp(h * 0.5 + 0.5, 0.0, 1.0);
+          gl_FragColor = vec4(mix(bottomColor, topColor, t), 1.0);
+        }
+      `,
       side: THREE.BackSide,
-      fog: false,
+      depthWrite: false,
     });
     const sky = new THREE.Mesh(skyGeo, skyMat);
     this.threeScene.add(sky);
@@ -303,81 +359,560 @@ export class World3D {
     this.threeScene.add(this.atmospherePoints);
   }
 
-  // Roads are now built by CityPopulator.buildStreetGrid()
+  // Roads are now built by addRoadStripes() between zones
 
   private addZonePads() {
-    Object.entries(ZONES).forEach(([key, zone]) => {
+    for (const [key, z] of Object.entries(ZONE_3D)) {
       const color = ZONE_COLORS[key] ?? 0x333333;
-      const wx = zone.x * SCALE - WORLD_CX;
-      const wz = zone.y * SCALE - WORLD_CZ;
-      const ww = zone.w * SCALE;
-      const wh = zone.h * SCALE;
+      const { cx, cz, w, h } = z;
+      const hw = w / 2, hh = h / 2;
 
-      // Zone floor pad
-      const padGeo = new THREE.PlaneGeometry(ww, wh);
+      // ── 1. Zone floor pad ──────────────────────────────────────────
+      const padGeo = new THREE.PlaneGeometry(w, h);
       const padMat = new THREE.MeshLambertMaterial({
-        color: new THREE.Color(color).multiplyScalar(0.08),
+        color: new THREE.Color(color).multiplyScalar(0.06),
         transparent: true,
-        opacity: 0.9,
+        opacity: 0.92,
       });
       const pad = new THREE.Mesh(padGeo, padMat);
       pad.rotation.x = -Math.PI / 2;
-      pad.position.set(wx, 0.015, wz);
+      pad.position.set(cx, 0.015, cz);
       pad.receiveShadow = true;
       this.threeScene.add(pad);
 
-      // Glowing border
-      const borderGeo = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(-ww / 2, 0, -wh / 2),
-        new THREE.Vector3( ww / 2, 0, -wh / 2),
-        new THREE.Vector3( ww / 2, 0,  wh / 2),
-        new THREE.Vector3(-ww / 2, 0,  wh / 2),
-      ]);
-      const border = new THREE.LineLoop(
-        borderGeo,
-        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.5 }),
-      );
-      border.position.set(wx, 0.03, wz);
-      this.threeScene.add(border);
+      // ── 2. Edge bars (thin emissive boxes) ─────────────────────────
+      const barH = 0.06, barD = 0.04;
+      const edgeMat = new THREE.MeshStandardMaterial({
+        color, emissive: new THREE.Color(color), emissiveIntensity: 0.6,
+        transparent: true, opacity: 0.7,
+      });
+      this.zoneEdgeMats.push(edgeMat);
+      const edges: [number, number, number, number, number][] = [
+        [cx, cz - hh, w, barH, barD],   // north
+        [cx, cz + hh, w, barH, barD],   // south
+        [cx - hw, cz, barD, barH, h],   // west
+        [cx + hw, cz, barD, barH, h],   // east
+      ];
+      for (const [ex, ez, ew, eh, ed] of edges) {
+        const bar = new THREE.Mesh(new THREE.BoxGeometry(ew, eh, ed), edgeMat);
+        bar.position.set(ex, 0.04, ez);
+        this.threeScene.add(bar);
+      }
 
-      // Zone accent point light
-      const light = new THREE.PointLight(color, 0.6, 8);
-      light.position.set(wx, 1.5, wz);
+      // ── 3. Corner pillars ──────────────────────────────────────────
+      const pillarGeo = new THREE.CylinderGeometry(0.04, 0.04, 0.5, 6);
+      const pillarMat = new THREE.MeshStandardMaterial({
+        color, emissive: new THREE.Color(color), emissiveIntensity: 0.8,
+      });
+      for (const dx of [-hw, hw]) {
+        for (const dz of [-hh, hh]) {
+          const pillar = new THREE.Mesh(pillarGeo, pillarMat);
+          pillar.position.set(cx + dx, 0.25, cz + dz);
+          pillar.castShadow = true;
+          this.threeScene.add(pillar);
+        }
+      }
+
+      // ── 4. Zone accent point light ─────────────────────────────────
+      const light = new THREE.PointLight(color, 0.8, 8);
+      light.position.set(cx, 2.0, cz);
       this.threeScene.add(light);
+      this.zoneLights.set(key, light);
 
-      // Zone label (floating sprite)
-      this.addZoneLabel(zone.icon + ' ' + zone.label, wx, wz, color);
-
-      // Invisible click zone (a flat box)
+      // ── 5. Invisible click zone ────────────────────────────────────
       const clickPad = new THREE.Mesh(
-        new THREE.BoxGeometry(ww, 0.01, wh),
+        new THREE.BoxGeometry(w, 0.01, h),
         new THREE.MeshBasicMaterial({ visible: false }),
       );
-      clickPad.position.set(wx, 0.05, wz);
+      clickPad.position.set(cx, 0.05, cz);
       this.threeScene.add(clickPad);
       this.clickables.push({ mesh: clickPad, type: 'zone', id: key });
-    });
+    }
   }
 
-  private addZoneLabel(text: string, x: number, z: number, color: number) {
-    // Create a canvas texture for the zone label
-    const canvas = document.createElement('canvas');
-    canvas.width = 256;
-    canvas.height = 48;
-    const ctx = canvas.getContext('2d')!;
-    ctx.font = '20px "Space Mono", monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#' + color.toString(16).padStart(6, '0');
-    ctx.globalAlpha = 0.7;
-    ctx.fillText(text, 128, 24);
+  /** Zone-specific ground treatments, themed props, and visual identity */
+  private buildZoneDetails() {
+    for (const [key, z] of Object.entries(ZONE_3D)) {
+      const color = ZONE_COLORS[key] ?? 0x333333;
+      const { cx, cz, w, h } = z;
 
-    const tex = new THREE.CanvasTexture(canvas);
-    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.8 });
-    const sprite = new THREE.Sprite(mat);
-    sprite.position.set(x, 0.4, z);
-    sprite.scale.set(3, 0.6, 1);
-    this.threeScene.add(sprite);
+      switch (key) {
+        case 'trading_floor':
+          this.buildTradingFloorDetails(cx, cz, w, h, color);
+          break;
+        case 'intel_hub':
+          this.buildIntelHubDetails(cx, cz, w, h, color);
+          break;
+        case 'watchtower':
+          this.buildWatchtowerDetails(cx, cz, w, h, color);
+          break;
+        case 'command_center':
+          this.buildCommandCenterDetails(cx, cz, w, h, color);
+          break;
+        case 'launchpad':
+          this.buildLaunchpadDetails(cx, cz, w, h, color);
+          break;
+        case 'agora':
+          this.buildAgoraDetails(cx, cz, w, h, color);
+          break;
+        case 'orca_pool':
+          this.buildOrcaPoolDetails(cx, cz, w, h, color);
+          break;
+        case 'burn_furnace':
+          this.buildBurnFurnaceDetails(cx, cz, w, h, color);
+          break;
+        case 'nova_bank':
+          this.buildNovaBankDetails(cx, cz, w, h, color);
+          break;
+      }
+    }
+  }
+
+  // ── Trading Floor: polished dark floor with green grid lines, terminal screens ──
+  private buildTradingFloorDetails(cx: number, cz: number, w: number, h: number, color: number) {
+    const gridMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.15 });
+    // Horizontal grid lines
+    const spacing = 0.5;
+    for (let z = cz - h / 2 + spacing; z < cz + h / 2; z += spacing) {
+      const line = new THREE.Mesh(new THREE.PlaneGeometry(w - 0.2, 0.02), gridMat);
+      line.rotation.x = -Math.PI / 2;
+      line.position.set(cx, 0.025, z);
+      this.threeScene.add(line);
+    }
+    // Vertical grid lines
+    for (let x = cx - w / 2 + spacing; x < cx + w / 2; x += spacing) {
+      const line = new THREE.Mesh(new THREE.PlaneGeometry(0.02, h - 0.2), gridMat);
+      line.rotation.x = -Math.PI / 2;
+      line.position.set(x, 0.025, cz);
+      this.threeScene.add(line);
+    }
+
+    // Glowing center ticker strip
+    const tickerMat = new THREE.MeshStandardMaterial({
+      color, emissive: new THREE.Color(color), emissiveIntensity: 0.4,
+      transparent: true, opacity: 0.6,
+    });
+    const ticker = new THREE.Mesh(new THREE.PlaneGeometry(w * 0.8, 0.08), tickerMat);
+    ticker.rotation.x = -Math.PI / 2;
+    ticker.position.set(cx, 0.03, cz);
+    this.threeScene.add(ticker);
+  }
+
+  // ── Intel Hub: blue data line patterns, antenna base markers ──
+  private buildIntelHubDetails(cx: number, cz: number, w: number, h: number, color: number) {
+    const lineMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.12 });
+
+    // Radial data lines from center
+    for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 6) {
+      const len = Math.min(w, h) * 0.4;
+      const lineGeo = new THREE.PlaneGeometry(0.03, len);
+      const line = new THREE.Mesh(lineGeo, lineMat);
+      line.rotation.x = -Math.PI / 2;
+      line.rotation.z = angle;
+      line.position.set(cx, 0.025, cz);
+      this.threeScene.add(line);
+    }
+
+    // Concentric rings
+    for (let r = 0.4; r <= Math.min(w, h) * 0.4; r += 0.5) {
+      const ringGeo = new THREE.RingGeometry(r - 0.02, r + 0.02, 32);
+      const ring = new THREE.Mesh(ringGeo, lineMat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.set(cx, 0.025, cz);
+      this.threeScene.add(ring);
+    }
+  }
+
+  // ── Watchtower: industrial grating, orange warning stripes ──
+  private buildWatchtowerDetails(cx: number, cz: number, w: number, h: number, color: number) {
+    // Warning stripes along edges
+    const stripeMat = new THREE.MeshBasicMaterial({ color: 0xff9500, transparent: true, opacity: 0.2 });
+    const stripeW = 0.15;
+    const hw = w / 2, hh = h / 2;
+
+    // Diagonal warning stripes on inner edge
+    for (let i = -5; i <= 5; i++) {
+      const stripe = new THREE.Mesh(new THREE.PlaneGeometry(stripeW, 0.6), stripeMat);
+      stripe.rotation.x = -Math.PI / 2;
+      stripe.rotation.z = Math.PI / 4;
+      stripe.position.set(cx - hw + 0.3, 0.025, cz + i * 0.4);
+      this.threeScene.add(stripe);
+
+      const stripe2 = new THREE.Mesh(new THREE.PlaneGeometry(stripeW, 0.6), stripeMat);
+      stripe2.rotation.x = -Math.PI / 2;
+      stripe2.rotation.z = Math.PI / 4;
+      stripe2.position.set(cx + hw - 0.3, 0.025, cz + i * 0.4);
+      this.threeScene.add(stripe2);
+    }
+
+    // Central cross marker
+    const crossMat = new THREE.MeshStandardMaterial({
+      color, emissive: new THREE.Color(color), emissiveIntensity: 0.3,
+      transparent: true, opacity: 0.5,
+    });
+    const crossH = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 0.06), crossMat);
+    crossH.rotation.x = -Math.PI / 2;
+    crossH.position.set(cx, 0.025, cz);
+    this.threeScene.add(crossH);
+    const crossV = new THREE.Mesh(new THREE.PlaneGeometry(0.06, 1.5), crossMat);
+    crossV.rotation.x = -Math.PI / 2;
+    crossV.position.set(cx, 0.025, cz);
+    this.threeScene.add(crossV);
+  }
+
+  // ── Command Center: elevated purple platform, central podium ──
+  private buildCommandCenterDetails(cx: number, cz: number, w: number, h: number, color: number) {
+    // Raised inner platform
+    const platGeo = new THREE.BoxGeometry(w * 0.6, 0.08, h * 0.6);
+    const platMat = new THREE.MeshStandardMaterial({
+      color: 0x110022, emissive: new THREE.Color(color), emissiveIntensity: 0.15,
+      roughness: 0.4,
+    });
+    const platform = new THREE.Mesh(platGeo, platMat);
+    platform.position.set(cx, 0.04, cz);
+    platform.receiveShadow = true;
+    this.threeScene.add(platform);
+
+    // Central hex podium
+    const hexGeo = new THREE.CylinderGeometry(0.3, 0.35, 0.15, 6);
+    const hexMat = new THREE.MeshStandardMaterial({
+      color, emissive: new THREE.Color(color), emissiveIntensity: 0.5,
+    });
+    const hex = new THREE.Mesh(hexGeo, hexMat);
+    hex.position.set(cx, 0.12, cz);
+    hex.castShadow = true;
+    this.threeScene.add(hex);
+
+    // Ring around podium
+    const ringGeo = new THREE.RingGeometry(0.45, 0.5, 32);
+    const ringMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.3 });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(cx, 0.03, cz);
+    this.threeScene.add(ring);
+  }
+
+  // ── Launchpad: scorched concrete, blast marks, landing pad circle ──
+  private buildLaunchpadDetails(cx: number, cz: number, w: number, h: number, color: number) {
+    // Scorched center circle
+    const scorchMat = new THREE.MeshStandardMaterial({
+      color: 0x1a0808, roughness: 1.0,
+      transparent: true, opacity: 0.8,
+    });
+    const scorch = new THREE.Mesh(new THREE.CircleGeometry(0.8, 24), scorchMat);
+    scorch.rotation.x = -Math.PI / 2;
+    scorch.position.set(cx, 0.022, cz);
+    scorch.receiveShadow = true;
+    this.threeScene.add(scorch);
+
+    // Landing pad markings — concentric rings
+    const padMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.25 });
+    for (const r of [0.6, 0.9, 1.2]) {
+      const ring = new THREE.Mesh(new THREE.RingGeometry(r - 0.03, r + 0.03, 32), padMat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.set(cx, 0.025, cz);
+      this.threeScene.add(ring);
+    }
+
+    // Cross hairs
+    const crossMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.2 });
+    const crossH = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 0.04), crossMat);
+    crossH.rotation.x = -Math.PI / 2;
+    crossH.position.set(cx, 0.025, cz);
+    this.threeScene.add(crossH);
+    const crossV = new THREE.Mesh(new THREE.PlaneGeometry(0.04, 2.4), crossMat);
+    crossV.rotation.x = -Math.PI / 2;
+    crossV.position.set(cx, 0.025, cz);
+    this.threeScene.add(crossV);
+
+    // Spark particles rising from pad
+    const sparkCount = 25;
+    const sPos = new Float32Array(sparkCount * 3);
+    const sVel = new Float32Array(sparkCount * 3);
+    for (let i = 0; i < sparkCount; i++) {
+      sPos[i * 3]     = cx + (Math.random() - 0.5) * 1.2;
+      sPos[i * 3 + 1] = Math.random() * 3;
+      sPos[i * 3 + 2] = cz + (Math.random() - 0.5) * 1.2;
+      sVel[i * 3]     = (Math.random() - 0.5) * 0.003;
+      sVel[i * 3 + 1] = 0.008 + Math.random() * 0.015;
+      sVel[i * 3 + 2] = (Math.random() - 0.5) * 0.003;
+    }
+    const sGeo = new THREE.BufferGeometry();
+    sGeo.setAttribute('position', new THREE.BufferAttribute(sPos, 3));
+    const sMat = new THREE.PointsMaterial({
+      color: 0xf472b6, size: 0.05, transparent: true, opacity: 0.7,
+      sizeAttenuation: true, depthWrite: false,
+    });
+    const sparks = new THREE.Points(sGeo, sMat);
+    sparks.frustumCulled = false;
+    this.threeScene.add(sparks);
+    this.launchSparks = { points: sparks, velocities: sVel };
+  }
+
+  // ── Agora: warm golden paving, open plaza feel ──
+  private buildAgoraDetails(cx: number, cz: number, w: number, h: number, color: number) {
+    // Warm paving overlay
+    const paveMat = new THREE.MeshStandardMaterial({
+      color: 0x2a2510, roughness: 0.8,
+      transparent: true, opacity: 0.5,
+    });
+    const pave = new THREE.Mesh(new THREE.PlaneGeometry(w * 0.85, h * 0.85), paveMat);
+    pave.rotation.x = -Math.PI / 2;
+    pave.position.set(cx, 0.02, cz);
+    pave.receiveShadow = true;
+    this.threeScene.add(pave);
+
+    // Decorative corner accents
+    const accentMat = new THREE.MeshStandardMaterial({
+      color, emissive: new THREE.Color(color), emissiveIntensity: 0.3,
+      transparent: true, opacity: 0.5,
+    });
+    const corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
+    for (const [dx, dz] of corners) {
+      const accent = new THREE.Mesh(new THREE.CircleGeometry(0.15, 8), accentMat);
+      accent.rotation.x = -Math.PI / 2;
+      accent.position.set(cx + dx * (w * 0.35), 0.025, cz + dz * (h * 0.35));
+      this.threeScene.add(accent);
+    }
+
+    // Central gathering circle
+    const gatherGeo = new THREE.RingGeometry(0.5, 0.55, 32);
+    const gatherMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.2 });
+    const gather = new THREE.Mesh(gatherGeo, gatherMat);
+    gather.rotation.x = -Math.PI / 2;
+    gather.position.set(cx, 0.025, cz);
+    this.threeScene.add(gather);
+  }
+
+  // ── Orca Pool: water surface, ripple ring ──
+  private orcaWaterMesh: THREE.Mesh | null = null;
+
+  private buildOrcaPoolDetails(cx: number, cz: number, w: number, h: number, _color: number) {
+    // Animated water plane
+    const waterGeo = new THREE.PlaneGeometry(w * 0.85, h * 0.85, 16, 16);
+    const waterMat = new THREE.MeshStandardMaterial({
+      color: 0x004422, emissive: new THREE.Color(0x003318), emissiveIntensity: 0.3,
+      transparent: true, opacity: 0.7,
+      roughness: 0.2, metalness: 0.3,
+    });
+    const water = new THREE.Mesh(waterGeo, waterMat);
+    water.rotation.x = -Math.PI / 2;
+    water.position.set(cx, 0.025, cz);
+    water.receiveShadow = true;
+    this.threeScene.add(water);
+    this.orcaWaterMesh = water;
+
+    // Pool edge ring
+    const edgeGeo = new THREE.RingGeometry(
+      Math.min(w, h) * 0.38, Math.min(w, h) * 0.42, 32
+    );
+    const edgeMat = new THREE.MeshStandardMaterial({
+      color: 0x006644, emissive: new THREE.Color(0x00ff88), emissiveIntensity: 0.2,
+      transparent: true, opacity: 0.5,
+    });
+    const edge = new THREE.Mesh(edgeGeo, edgeMat);
+    edge.rotation.x = -Math.PI / 2;
+    edge.position.set(cx, 0.03, cz);
+    this.threeScene.add(edge);
+  }
+
+  // ── Burn Furnace: charred ground, glowing red cracks ──
+  private buildBurnFurnaceDetails(cx: number, cz: number, w: number, h: number, color: number) {
+    // Charred ground
+    const charMat = new THREE.MeshStandardMaterial({
+      color: 0x1a0500, roughness: 1.0,
+      transparent: true, opacity: 0.7,
+    });
+    const charred = new THREE.Mesh(new THREE.PlaneGeometry(w * 0.85, h * 0.85), charMat);
+    charred.rotation.x = -Math.PI / 2;
+    charred.position.set(cx, 0.02, cz);
+    charred.receiveShadow = true;
+    this.threeScene.add(charred);
+
+    // Glowing red cracks (random lines)
+    const crackMat = new THREE.MeshStandardMaterial({
+      color, emissive: new THREE.Color(color), emissiveIntensity: 0.8,
+      transparent: true, opacity: 0.4,
+    });
+    const crackAngles = [0, 0.7, 1.5, 2.3, 3.1, 4.0, 5.2];
+    for (const angle of crackAngles) {
+      const len = 0.3 + Math.random() * 0.8;
+      const crack = new THREE.Mesh(new THREE.PlaneGeometry(0.03, len), crackMat);
+      crack.rotation.x = -Math.PI / 2;
+      crack.rotation.z = angle;
+      crack.position.set(
+        cx + Math.cos(angle) * 0.3,
+        0.025,
+        cz + Math.sin(angle) * 0.3,
+      );
+      this.threeScene.add(crack);
+    }
+
+    // Central furnace glow
+    const glowLight = new THREE.PointLight(0xff2200, 1.0, 5);
+    glowLight.position.set(cx, 0.5, cz);
+    this.threeScene.add(glowLight);
+
+    // Ember particles
+    const emberCount = 40;
+    const ePos = new Float32Array(emberCount * 3);
+    const eVel = new Float32Array(emberCount * 3);
+    for (let i = 0; i < emberCount; i++) {
+      ePos[i * 3]     = cx + (Math.random() - 0.5) * w * 0.6;
+      ePos[i * 3 + 1] = Math.random() * 2;
+      ePos[i * 3 + 2] = cz + (Math.random() - 0.5) * h * 0.6;
+      eVel[i * 3]     = (Math.random() - 0.5) * 0.005;
+      eVel[i * 3 + 1] = 0.005 + Math.random() * 0.01;
+      eVel[i * 3 + 2] = (Math.random() - 0.5) * 0.005;
+    }
+    const eGeo = new THREE.BufferGeometry();
+    eGeo.setAttribute('position', new THREE.BufferAttribute(ePos, 3));
+    const eMat = new THREE.PointsMaterial({
+      color: 0xff4400, size: 0.06, transparent: true, opacity: 0.8,
+      sizeAttenuation: true, depthWrite: false,
+    });
+    const embers = new THREE.Points(eGeo, eMat);
+    embers.frustumCulled = false;
+    this.threeScene.add(embers);
+    this.burnEmbers = { points: embers, velocities: eVel };
+  }
+
+  // ── Nova Bank: gold-trimmed marble floor, pillars ──
+  private buildNovaBankDetails(cx: number, cz: number, w: number, h: number, color: number) {
+    // Marble floor overlay
+    const marbleMat = new THREE.MeshStandardMaterial({
+      color: 0x1a1508, roughness: 0.3, metalness: 0.1,
+      transparent: true, opacity: 0.6,
+    });
+    const marble = new THREE.Mesh(new THREE.PlaneGeometry(w * 0.85, h * 0.85), marbleMat);
+    marble.rotation.x = -Math.PI / 2;
+    marble.position.set(cx, 0.02, cz);
+    marble.receiveShadow = true;
+    this.threeScene.add(marble);
+
+    // Gold trim lines
+    const trimMat = new THREE.MeshStandardMaterial({
+      color, emissive: new THREE.Color(color), emissiveIntensity: 0.4,
+      transparent: true, opacity: 0.5,
+    });
+    // Border inset
+    const inset = 0.3;
+    const iw = w * 0.85 - inset * 2, ih = h * 0.85 - inset * 2;
+    const trimLines: [number, number, number, number][] = [
+      [cx, cz - ih / 2, iw, 0.04],
+      [cx, cz + ih / 2, iw, 0.04],
+      [cx - iw / 2, cz, 0.04, ih],
+      [cx + iw / 2, cz, 0.04, ih],
+    ];
+    for (const [tx, tz, tw, th] of trimLines) {
+      const trim = new THREE.Mesh(new THREE.PlaneGeometry(tw, th), trimMat);
+      trim.rotation.x = -Math.PI / 2;
+      trim.position.set(tx, 0.025, tz);
+      this.threeScene.add(trim);
+    }
+
+    // Corner pillars (decorative)
+    const pillarGeo = new THREE.CylinderGeometry(0.06, 0.08, 0.8, 8);
+    const pillarMat = new THREE.MeshStandardMaterial({
+      color, emissive: new THREE.Color(color), emissiveIntensity: 0.2,
+      metalness: 0.5, roughness: 0.3,
+    });
+    const corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
+    for (const [dx, dz] of corners) {
+      const pillar = new THREE.Mesh(pillarGeo, pillarMat);
+      pillar.position.set(cx + dx * (iw / 2), 0.4, cz + dz * (ih / 2));
+      pillar.castShadow = true;
+      this.threeScene.add(pillar);
+    }
+  }
+
+  /** Floating billboard labels — call after scene geometry is built */
+  private createZoneLabels() {
+    for (const [key, z] of Object.entries(ZONE_3D)) {
+      const zone = ZONES[key];
+      if (!zone) continue;
+      const color = ZONE_COLORS[key] ?? 0x888888;
+
+      // Canvas billboard
+      const canvas = document.createElement('canvas');
+      canvas.width = 512;
+      canvas.height = 96;
+      const ctx = canvas.getContext('2d')!;
+      ctx.clearRect(0, 0, 512, 96);
+      // Background bar
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.roundRect(8, 8, 496, 80, 12);
+      ctx.fill();
+      // Icon + label
+      ctx.font = 'bold 36px "Space Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#' + color.toString(16).padStart(6, '0');
+      ctx.fillText(zone.icon + ' ' + zone.label, 256, 48);
+
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.9, depthTest: false });
+      const sprite = new THREE.Sprite(mat);
+      sprite.position.set(z.cx, 2.4, z.cz - z.h / 2 - 0.3);
+      sprite.scale.set(4.0, 0.75, 1);
+      this.threeScene.add(sprite);
+      this.zoneLabels.push(sprite);
+    }
+  }
+
+  /** Road stripes between zones */
+  private addRoadStripes() {
+    const roadMat = new THREE.MeshStandardMaterial({
+      color: 0x222222, roughness: 0.95, metalness: 0,
+    });
+    const stripeMat = new THREE.MeshBasicMaterial({
+      color: 0xffff44, transparent: true, opacity: 0.35,
+    });
+    for (const [a, b] of ROAD_SEGMENTS) {
+      const dx = b.x - a.x, dz = b.y - a.y;
+      const len = Math.sqrt(dx * dx + dz * dz);
+      if (len < 0.01) continue;
+      const angle = Math.atan2(dx, dz);
+      const roadW = 1.4;
+      // Road surface
+      const roadGeo = new THREE.PlaneGeometry(roadW, len);
+      const road = new THREE.Mesh(roadGeo, roadMat);
+      road.rotation.x = -Math.PI / 2;
+      road.rotation.z = -angle;
+      road.position.set((a.x + b.x) / 2, 0.012, (a.y + b.y) / 2);
+      road.receiveShadow = true;
+      this.threeScene.add(road);
+      // Centre dashes
+      const dashCount = Math.floor(len / 0.8);
+      for (let i = 0; i < dashCount; i++) {
+        const t = (i + 0.5) / dashCount;
+        const sx = a.x + dx * t, sz = a.y + dz * t;
+        const dash = new THREE.Mesh(new THREE.PlaneGeometry(0.06, 0.3), stripeMat);
+        dash.rotation.x = -Math.PI / 2;
+        dash.rotation.z = -angle;
+        dash.position.set(sx, 0.014, sz);
+        this.threeScene.add(dash);
+      }
+    }
+  }
+
+  /** Spawn vehicles on ROAD_PATHS_3D loops */
+  private async loadVehicles() {
+    const carModels = ['sedan','sedanSports','truck','ambulance','delivery','taxi','police','van'];
+    for (let i = 0; i < ROAD_PATHS_3D.length; i++) {
+      const path = ROAD_PATHS_3D[i];
+      const filename = carModels[i % carModels.length];
+      try {
+        const gltf = await this.loader.loadAsync('/kenney/models/cars/' + filename + '.glb');
+        const model = gltf.scene;
+        model.scale.setScalar(0.6);
+        model.traverse(c => { if (c instanceof THREE.Mesh) { c.castShadow = true; } });
+        this.threeScene.add(model);
+        this.vehicles.push(new VehicleObject3D(model, path, 0));
+      } catch {
+        // Skip if model not found
+      }
+    }
   }
 
   // ── Colormap cache ─────────────────────────────────────────────────────────
@@ -423,6 +958,18 @@ export class World3D {
     console.log('[World3D] Ambient life spawned');
     bump();
 
+    // Custom Blender hero assets (graceful skip if not built)
+    await this.loadCustomAssets();
+    console.log('[World3D] Custom hero assets loaded');
+
+    // Zone billboard labels (after buildings are placed)
+    this.createZoneLabels();
+    console.log('[World3D] Zone labels created');
+
+    // Vehicles on inter-zone roads
+    await this.loadVehicles();
+    console.log('[World3D] Road vehicles spawned');
+
     this.sceneReady = true;
     console.log('[World3D] Scene ready — sceneReady = true');
 
@@ -437,18 +984,15 @@ export class World3D {
 
   private async loadZoneBuildings(bump: () => void) {
     for (const [zoneKey, cfg] of Object.entries(ZONE_BUILDINGS)) {
-      const zone = ZONES[zoneKey];
-      if (!zone) { bump(); continue; }
+      const z3d = ZONE_3D[zoneKey];
+      if (!z3d) { bump(); continue; }
 
       const colormap = await this.getColormap(cfg.dir);
-      const cx = zone.x * SCALE - WORLD_CX;
-      const cz = zone.y * SCALE - WORLD_CZ;
-      const ww = zone.w * SCALE;
-      const wh = zone.h * SCALE;
+      const { cx, cz, w, h } = z3d;
       const zoneColor = ZONE_COLORS[zoneKey] ?? 0x888888;
 
       // Create layout grid for this zone
-      const layout = new ZoneLayout(cx, cz, ww, wh, 2.0);
+      const layout = new ZoneLayout(cx, cz, w, h, 2.0);
       this.zoneLayouts.set(zoneKey, layout);
 
       let placed = 0;
@@ -510,8 +1054,84 @@ export class World3D {
     this.threeScene.add(mesh);
   }
 
-  // Road tiles are now placed by CityPopulator.buildStreetGrid()
-  // Vehicles are now spawned by AmbientLife
+  // ── Custom Blender hero assets ─────────────────────────────────────────────
+
+  private static readonly ZONE_HERO_ASSETS: Record<string, {
+    file: string; scale?: number; yOffset?: number; rotateY?: number;
+    secondaryProps?: Array<{ file: string; offsetX: number; offsetZ: number; scale?: number }>;
+  }> = {
+    trading_floor: {
+      file: 'nova-tower', scale: 1.0,
+      secondaryProps: [
+        { file: 'lp-pool', offsetX: -1.2, offsetZ:  0.8, scale: 0.8 },
+        { file: 'lp-pool', offsetX:  1.2, offsetZ: -0.8, scale: 0.6 },
+        { file: 'crypto-atm', offsetX:  1.5, offsetZ:  1.0, scale: 0.7 },
+        { file: 'crypto-atm', offsetX: -1.5, offsetZ: -1.0, scale: 0.7 },
+      ],
+    },
+    intel_hub: {
+      file: 'satellite-array', scale: 1.0,
+      secondaryProps: [
+        { file: 'data-pillar', offsetX: -0.8, offsetZ: 0.5 },
+        { file: 'data-pillar', offsetX:  0.8, offsetZ: -0.5 },
+      ],
+    },
+    command_center: { file: 'nova-hq', scale: 1.1 },
+    launchpad: {
+      file: 'launch-pad', scale: 1.0,
+      secondaryProps: [{ file: 'rocket', offsetX: 0, offsetZ: 0, scale: 1.0 }],
+    },
+    watchtower:    { file: 'guard-tower', scale: 1.0 },
+    agora: {
+      file: 'agora-plaza', scale: 1.0,
+      secondaryProps: [
+        { file: 'crypto-atm', offsetX: 1.0, offsetZ: 0.5, scale: 0.7 },
+      ],
+    },
+    burn_furnace:  { file: 'burn-furnace', scale: 1.0 },
+    nova_bank:     { file: 'nova-bank', scale: 1.0, rotateY: 180 },
+  };
+
+  private async loadCustomAssets(): Promise<void> {
+    for (const [zoneKey, hero] of Object.entries(World3D.ZONE_HERO_ASSETS)) {
+      const z3d = ZONE_3D[zoneKey];
+      if (!z3d) continue;
+      const { cx, cz } = z3d;
+
+      const heroPath = `/kenney/models/custom/${hero.file}.glb`;
+      try {
+        const gltf = await this.loader.loadAsync(heroPath);
+        const model = gltf.scene;
+        model.traverse(child => {
+          if (child instanceof THREE.Mesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+          }
+        });
+        model.scale.setScalar(hero.scale ?? 1.0);
+        model.position.set(cx, hero.yOffset ?? 0, cz);
+        if (hero.rotateY) model.rotation.y = THREE.MathUtils.degToRad(hero.rotateY);
+        this.threeScene.add(model);
+        this.collision.addBuilding(`hero_${zoneKey}`, model);
+
+        if (hero.secondaryProps) {
+          for (const prop of hero.secondaryProps) {
+            try {
+              const pg = await this.loader.loadAsync(`/kenney/models/custom/${prop.file}.glb`);
+              const pm = pg.scene;
+              pm.scale.setScalar(prop.scale ?? 1.0);
+              pm.position.set(cx + prop.offsetX, 0, cz + prop.offsetZ);
+              pm.traverse(c => { if (c instanceof THREE.Mesh) c.castShadow = true; });
+              this.threeScene.add(pm);
+              this.collision.addBuilding(`prop_${zoneKey}_${prop.file}`, pm);
+            } catch { /* prop not built yet */ }
+          }
+        }
+      } catch {
+        console.debug(`[World3D] Custom asset not found: ${heroPath} (run npm run build:assets)`);
+      }
+    }
+  }
 
   // ── Agent spawning ────────────────────────────────────────────────────────
 
@@ -522,9 +1142,9 @@ export class World3D {
     if (!cfg) return;
 
     const def = AGENT_DEFS[agentId];
-    const zone = def?.zone ? ZONES[def.zone] : null;
-    const cx = zone ? (zone.x * SCALE - WORLD_CX) : 0;
-    const cz = zone ? (zone.y * SCALE - WORLD_CZ) : 0;
+    const z3d = def?.zone ? ZONE_3D[def.zone] : null;
+    const cx = z3d ? z3d.cx : 0;
+    const cz = z3d ? z3d.cz : 0;
 
     // Use zone layout to find a valid spawn point (clear of buildings)
     const layout = (def?.zone) ? this.zoneLayouts.get(def.zone) : null;
@@ -666,12 +1286,15 @@ export class World3D {
     // Move agent to event's target zone
     const zoneKey = ACTION_ZONE_MAP[event.action];
     if (zoneKey) {
-      const zone = ZONES[zoneKey];
-      if (zone) {
-        const tx = (zone.x * SCALE - WORLD_CX) + (Math.random() - 0.5) * (zone.w * SCALE * 0.5);
-        const tz = (zone.y * SCALE - WORLD_CZ) + (Math.random() - 0.5) * (zone.h * SCALE * 0.5);
+      const z3d = ZONE_3D[zoneKey];
+      if (z3d) {
+        const tx = z3d.cx + (Math.random() - 0.5) * (z3d.w * 0.5);
+        const tz = z3d.cz + (Math.random() - 0.5) * (z3d.h * 0.5);
         agent.walkTo(tx, tz, this.collision);
         agent.state.currentZone = zoneKey;
+
+        // Zone entry flash — pulse the zone light
+        this.flashZoneBorder(zoneKey);
       }
     }
 
@@ -691,6 +1314,32 @@ export class World3D {
       if (id.includes(lower) || lower.includes(id.replace('nova-', ''))) return agent;
     }
     return null;
+  }
+
+  // ── Zone border flash effect ─────────────────────────────────────────────
+
+  private flashZoneBorder(zoneKey: string) {
+    const light = this.zoneLights.get(zoneKey);
+    if (!light) return;
+    const originalIntensity = light.intensity;
+    const originalDistance = light.distance;
+    light.intensity = 5;
+    light.distance = 20;
+    // Quick flash then fade back
+    const start = performance.now();
+    const flashTick = () => {
+      const elapsed = (performance.now() - start) / 1000;
+      if (elapsed > 0.6) {
+        light.intensity = originalIntensity;
+        light.distance = originalDistance;
+        return;
+      }
+      const t = elapsed / 0.6;
+      light.intensity = 5 * (1 - t) + originalIntensity * t;
+      light.distance = 20 * (1 - t) + originalDistance * t;
+      requestAnimationFrame(flashTick);
+    };
+    requestAnimationFrame(flashTick);
   }
 
   // ── Particles ─────────────────────────────────────────────────────────────
@@ -745,8 +1394,16 @@ export class World3D {
   // ── Camera ────────────────────────────────────────────────────────────────
 
   private updateCamera() {
-    this.camera.position.copy(this.camTarget).add(this.camOffset);
-    this.camera.lookAt(this.camTarget);
+    this.camera.position.copy(this.camTargetSmooth).add(this.camOffsetSmooth);
+    this.camera.lookAt(this.camTargetSmooth);
+  }
+
+  /** Smoothly interpolate camera toward target each frame */
+  private lerpCamera(delta: number) {
+    const lerpFactor = 1 - Math.pow(0.001, delta); // ~smooth at any framerate
+    this.camTargetSmooth.lerp(this.camTarget, lerpFactor);
+    this.camOffsetSmooth.lerp(this.camOffset, lerpFactor);
+    this.updateCamera();
   }
 
   private setupControls(canvas: HTMLCanvasElement) {
@@ -760,15 +1417,14 @@ export class World3D {
       const dx = e.clientX - this.lastMouse.x;
       const dy = e.clientY - this.lastMouse.y;
       this.camTarget.x -= dx * this.panSpeed;
-      this.camTarget.z += dy * this.panSpeed;
+      this.camTarget.z -= dy * this.panSpeed;
       this.lastMouse = { x: e.clientX, y: e.clientY };
-      this.updateCamera();
     });
 
-    // Scroll to zoom
+    // Scroll to zoom (scroll down = zoom in, scroll up = zoom out)
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
-      this.camOffset.multiplyScalar(e.deltaY > 0 ? 1.1 : 0.9);
+      this.camOffset.multiplyScalar(e.deltaY > 0 ? 0.9 : 1.1);
       this.camOffset.y = Math.max(5, Math.min(50, this.camOffset.y));
       this.camOffset.z = Math.max(3, Math.min(45, this.camOffset.z));
       this.updateCamera();
@@ -793,9 +1449,8 @@ export class World3D {
       const dx = t.clientX - this.lastMouse.x;
       const dy = t.clientY - this.lastMouse.y;
       this.camTarget.x -= dx * this.panSpeed;
-      this.camTarget.z += dy * this.panSpeed;
+      this.camTarget.z -= dy * this.panSpeed;
       this.lastMouse = { x: t.clientX, y: t.clientY };
-      this.updateCamera();
     });
   }
 
@@ -898,13 +1553,14 @@ export class World3D {
 
   private async onZoneClicked(zoneKey: string) {
     const zone = ZONES[zoneKey];
-    if (!zone) return;
+    const z3d = ZONE_3D[zoneKey];
+    if (!zone || !z3d) return;
 
     const color = '#' + (ZONE_COLORS[zoneKey] ?? 0x888888).toString(16).padStart(6, '0');
     this.hud?.showZonePanel(zoneKey, zone.icon + ' ' + zone.label, color);
 
     // Focus camera on zone
-    this.camTarget.set(zone.x * SCALE - WORLD_CX, 0, zone.y * SCALE - WORLD_CZ);
+    this.camTarget.set(z3d.cx, 0, z3d.cz);
     this.updateCamera();
 
     // Fetch zone-specific data
@@ -975,31 +1631,116 @@ export class World3D {
 
     // WASD camera pan (use speed * delta for frame-rate independence)
     const speed = 6 * delta;
-    let moved = false;
-    if (this.keys.has('ArrowUp'))    { this.camTarget.z -= speed; moved = true; }
-    if (this.keys.has('ArrowDown'))  { this.camTarget.z += speed; moved = true; }
-    if (this.keys.has('ArrowLeft'))  { this.camTarget.x -= speed; moved = true; }
-    if (this.keys.has('ArrowRight')) { this.camTarget.x += speed; moved = true; }
-    if (moved) this.updateCamera();
+    if (this.keys.has('ArrowUp') || this.keys.has('w'))    { this.camTarget.z -= speed; }
+    if (this.keys.has('ArrowDown') || this.keys.has('s'))  { this.camTarget.z += speed; }
+    if (this.keys.has('ArrowLeft') || this.keys.has('a'))  { this.camTarget.x -= speed; }
+    if (this.keys.has('ArrowRight') || this.keys.has('d')) { this.camTarget.x += speed; }
+
+    // Smooth camera interpolation
+    this.lerpCamera(delta);
 
     // Update animation mixers
     for (const m of this.mixers) m.update(delta);
 
-    // Agent idle animations — subtle sway only (Y grounding is handled by AgentObject3D)
+    // Agent animations — idle sway/look-around + walking bob
     const time = performance.now() * 0.001;
     for (const [, agent] of this.agents) {
       if (!agent.state.isWalking) {
-        agent.model.rotation.z = Math.sin(time * 0.8 + agent.color * 0.02) * 0.015;
+        // Idle: gentle breathing sway + occasional head turn
+        const idlePhase = time * 0.8 + agent.color * 0.02;
+        agent.model.rotation.z = Math.sin(idlePhase) * 0.015;
         agent.model.rotation.x = 0;
+        // Slow look-around: agent faces different direction over time
+        const lookPhase = time * 0.15 + agent.color * 0.1;
+        agent.model.rotation.y = Math.sin(lookPhase) * 0.4;
+        // Subtle hover/breathing on Y
+        agent.model.position.y = GROUND_Y + Math.sin(idlePhase * 1.3) * 0.008;
       } else {
+        // Walking: purposeful lean + bounce
         agent.model.rotation.z = Math.sin(time * 6) * 0.04;
-        agent.model.rotation.x = 0.03;
+        agent.model.rotation.x = 0.05;
+        agent.model.position.y = GROUND_Y + Math.abs(Math.sin(time * 8)) * 0.015;
       }
       agent.updateBubble(this.camera);
     }
 
     // Update ambient life (NPCs, traffic, smoke)
     this.ambientLife.tick(delta);
+
+    // Zone light pulse — glow brighter at night (cyberpunk neon beacon effect)
+    const tod = this.weather.getTimeOfDay();
+    const isNight = tod < 6 || tod > 19;
+    const nightTransition = (tod >= 6 && tod <= 7) ? (7 - tod) : (tod >= 18 && tod <= 19) ? (tod - 18) : isNight ? 1.0 : 0.0;
+    const zoneLightMul = 1.0 + nightTransition * 1.5;
+    for (const [, zl] of this.zoneLights) {
+      zl.intensity = (0.6 + Math.sin(time * 1.2 + zl.color.getHex() * 0.0001) * 0.25) * zoneLightMul;
+      zl.distance = isNight ? 14 : 8;
+    }
+
+    // Zone edge bars glow at night
+    const edgeGlow = 0.6 + nightTransition * 1.2;
+    for (const mat of this.zoneEdgeMats) {
+      mat.emissiveIntensity = edgeGlow;
+      mat.opacity = 0.7 + nightTransition * 0.3;
+    }
+
+    // Orca Pool water animation
+    if (this.orcaWaterMesh) {
+      const wPos = this.orcaWaterMesh.geometry.attributes.position;
+      const wArr = wPos.array as Float32Array;
+      for (let i = 0; i < wPos.count; i++) {
+        const wx = wArr[i * 3], wy = wArr[i * 3 + 1];
+        wArr[i * 3 + 2] = Math.sin(wx * 3 + time * 1.5) * 0.015 + Math.cos(wy * 4 + time * 1.2) * 0.01;
+      }
+      wPos.needsUpdate = true;
+    }
+
+    // Burn Furnace ember particles — drift upward, reset when too high
+    if (this.burnEmbers) {
+      const bz = ZONE_3D.burn_furnace;
+      const ePos = this.burnEmbers.points.geometry.attributes.position.array as Float32Array;
+      const eVel = this.burnEmbers.velocities;
+      const eCount = ePos.length / 3;
+      for (let i = 0; i < eCount; i++) {
+        ePos[i * 3]     += eVel[i * 3] + Math.sin(time + i) * 0.002;
+        ePos[i * 3 + 1] += eVel[i * 3 + 1];
+        ePos[i * 3 + 2] += eVel[i * 3 + 2];
+        if (ePos[i * 3 + 1] > 3) {
+          ePos[i * 3]     = bz.cx + (Math.random() - 0.5) * bz.w * 0.6;
+          ePos[i * 3 + 1] = 0.1;
+          ePos[i * 3 + 2] = bz.cz + (Math.random() - 0.5) * bz.h * 0.6;
+        }
+      }
+      this.burnEmbers.points.geometry.attributes.position.needsUpdate = true;
+      (this.burnEmbers.points.material as THREE.PointsMaterial).opacity = 0.5 + Math.sin(time * 2) * 0.3;
+    }
+
+    // Launchpad spark particles — rise and reset
+    if (this.launchSparks) {
+      const lz = ZONE_3D.launchpad;
+      const sPos = this.launchSparks.points.geometry.attributes.position.array as Float32Array;
+      const sVel = this.launchSparks.velocities;
+      const sCount = sPos.length / 3;
+      for (let i = 0; i < sCount; i++) {
+        sPos[i * 3]     += sVel[i * 3];
+        sPos[i * 3 + 1] += sVel[i * 3 + 1];
+        sPos[i * 3 + 2] += sVel[i * 3 + 2];
+        if (sPos[i * 3 + 1] > 4) {
+          sPos[i * 3]     = lz.cx + (Math.random() - 0.5) * 1.2;
+          sPos[i * 3 + 1] = 0.1;
+          sPos[i * 3 + 2] = lz.cz + (Math.random() - 0.5) * 1.2;
+        }
+      }
+      this.launchSparks.points.geometry.attributes.position.needsUpdate = true;
+    }
+
+    // Update inter-zone vehicles
+    for (const v of this.vehicles) v.update(delta, this.collision);
+
+    // Update sky uniforms from weather
+    if (this.skyUniforms) {
+      this.weather.updateSky(this.skyUniforms);
+    }
 
     // Animate atmosphere particles
     if (this.atmospherePoints && this.atmosphereVelocities) {
@@ -1037,9 +1778,9 @@ export class World3D {
   }
 
   focusZone(zoneKey: string) {
-    const zone = ZONES[zoneKey];
-    if (!zone) return;
-    this.camTarget.set(zone.x * SCALE - WORLD_CX, 0, zone.y * SCALE - WORLD_CZ);
+    const z3d = ZONE_3D[zoneKey];
+    if (!z3d) return;
+    this.camTarget.set(z3d.cx, 0, z3d.cz);
     this.updateCamera();
   }
 }

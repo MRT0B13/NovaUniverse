@@ -32,6 +32,10 @@ export class AgentObject3D {
   // Grounded Y position (computed once at spawn)
   private groundY = 0;
 
+  // Zone identity visuals
+  public groundRing: THREE.Mesh | null = null;
+  public agentLight: THREE.PointLight | null = null;
+
   constructor(
     agentId: string,
     model: THREE.Object3D,
@@ -109,9 +113,27 @@ export class AgentObject3D {
     // Start idle
     idleAction?.play();
 
+    // 4. Ground ring (colored circle below feet)
+    const ringGeo = new THREE.RingGeometry(0.22, 0.32, 24);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+    });
+    const groundRing = new THREE.Mesh(ringGeo, ringMat);
+    groundRing.rotation.x = -Math.PI / 2;
+    groundRing.position.set(spawnX, 0.02, spawnZ);
+    scene.add(groundRing);
+
+    // 5. Agent glow point light
+    const agentLight = new THREE.PointLight(color, 0.4, 3);
+    agentLight.position.set(spawnX, 0.8, spawnZ);
+    scene.add(agentLight);
+
     scene.add(model);
 
-    return new AgentObject3D(agentId, model, mixer, idleAction, walkAction, color, cssColor);
+    const agent = new AgentObject3D(agentId, model, mixer, idleAction, walkAction, color, cssColor);
+    agent.groundRing = groundRing;
+    agent.agentLight = agentLight;
+    return agent;
   }
 
   // ── Walk to world position (collision-aware) ───────────────────────────────
@@ -152,6 +174,16 @@ export class AgentObject3D {
       this.model.position.x = startX + (destX - startX) * ease;
       this.model.position.z = startZ + (destZ - startZ) * ease;
       this.model.position.y = this.groundY; // never drift off ground
+
+      // Sync ring + light with agent position
+      if (this.groundRing) {
+        this.groundRing.position.x = this.model.position.x;
+        this.groundRing.position.z = this.model.position.z;
+      }
+      if (this.agentLight) {
+        this.agentLight.position.x = this.model.position.x;
+        this.agentLight.position.z = this.model.position.z;
+      }
 
       if (t < 1) {
         requestAnimationFrame(tick);
@@ -239,5 +271,7 @@ export class AgentObject3D {
   destroy() {
     this.clearBubble();
     this.model.removeFromParent();
+    if (this.groundRing) this.groundRing.removeFromParent();
+    if (this.agentLight) this.agentLight.removeFromParent();
   }
 }
