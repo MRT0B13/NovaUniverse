@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { ZONES, WORLD_WIDTH, WORLD_HEIGHT } from '../config/constants';
+import { ZONE_3D } from './World3D';
 
 // ── Layout Constants ──────────────────────────────────────────────────────────
 const SCALE    = 0.01;
@@ -75,12 +76,11 @@ const VEGETATION = [
 // ── Zone boxes ────────────────────────────────────────────────────────────────
 interface BBox { xMin: number; xMax: number; zMin: number; zMax: number; }
 function getZoneBoxes(): BBox[] {
-  return Object.values(ZONES).map(z => {
-    const cx = z.x * SCALE - WORLD_CX;
-    const cz = z.y * SCALE - WORLD_CZ;
-    const hw = (z.w * SCALE) / 2;
-    const hh = (z.h * SCALE) / 2;
-    return { xMin: cx - hw - 0.3, xMax: cx + hw + 0.3, zMin: cz - hh - 0.3, zMax: cz + hh + 0.3 };
+  // Use ZONE_3D (hand-tuned 3D positions) for accurate exclusion
+  return Object.values(ZONE_3D).map(z => {
+    const hw = z.w / 2;
+    const hh = z.h / 2;
+    return { xMin: z.cx - hw - 0.5, xMax: z.cx + hw + 0.5, zMin: z.cz - hh - 0.5, zMax: z.cz + hh + 0.5 };
   });
 }
 function inZone(x: number, z: number, boxes: BBox[]): boolean {

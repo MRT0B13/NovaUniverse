@@ -22,15 +22,15 @@ const WORLD_CZ      = (WORLD_HEIGHT * SCALE) / 2;  // ~9
 
 // ── Zone → building assignment ────────────────────────────────────────────────
 const ZONE_BUILDINGS: Record<string, { dir: string; files: string[]; count: number }> = {
-  trading_floor:  { dir: 'commercial',  files: ['building-skyscraper-a','building-skyscraper-b','building-skyscraper-c','building-c','building-d'], count: 5 },
-  intel_hub:      { dir: 'commercial',  files: ['building-e','building-f','building-g','building-h','low-detail-building-c'], count: 4 },
-  watchtower:     { dir: 'industrial',  files: ['building-a','building-b','building-c','chimney-large','chimney-medium'], count: 4 },
-  command_center: { dir: 'commercial',  files: ['building-skyscraper-d','building-skyscraper-e','building-a','building-b'], count: 4 },
-  launchpad:      { dir: 'industrial',  files: ['building-h','building-i','building-j','building-k','detail-tank'], count: 4 },
-  agora:          { dir: 'suburban',    files: ['building-type-a','building-type-b','building-type-c','building-type-d','tree-large','tree-small'], count: 5 },
+  trading_floor:  { dir: 'commercial',  files: ['building-skyscraper-a','building-skyscraper-b','building-skyscraper-c','building-c','building-d','building-e','building-f'], count: 7 },
+  intel_hub:      { dir: 'commercial',  files: ['building-e','building-f','building-g','building-h','low-detail-building-c','low-detail-building-d'], count: 6 },
+  watchtower:     { dir: 'industrial',  files: ['building-a','building-b','building-c','chimney-large','chimney-medium','building-d'], count: 6 },
+  command_center: { dir: 'commercial',  files: ['building-skyscraper-d','building-skyscraper-e','building-a','building-b','building-c','low-detail-building-a'], count: 6 },
+  launchpad:      { dir: 'industrial',  files: ['building-h','building-i','building-j','building-k','detail-tank','building-l'], count: 6 },
+  agora:          { dir: 'suburban',    files: ['building-type-a','building-type-b','building-type-c','building-type-d','tree-large','tree-small','building-type-e'], count: 7 },
   orca_pool:      { dir: 'commercial',  files: ['low-detail-building-a','low-detail-building-b','low-detail-building-d','low-detail-building-e'], count: 4 },
-  burn_furnace:   { dir: 'industrial',  files: ['chimney-large','chimney-small','chimney-basic','detail-tank','building-d','building-e'], count: 5 },
-  nova_bank:      { dir: 'commercial',  files: ['building-a','building-b','building-c','building-d','low-detail-building-a'], count: 4 },
+  burn_furnace:   { dir: 'industrial',  files: ['chimney-large','chimney-small','chimney-basic','detail-tank','building-d','building-e'], count: 6 },
+  nova_bank:      { dir: 'commercial',  files: ['building-a','building-b','building-c','building-d','low-detail-building-a','low-detail-building-b'], count: 6 },
 };
 
 
@@ -58,43 +58,55 @@ const ZONE_COLORS: Record<string, number> = {
 };
 
 // ── 3D Zone positions (hand-tuned, no SCALE conversion) ──────────────────────
+// Layout: 3-column grid with generous spacing.  Roads run between zones.
+//
+//   Row 0 (north):   trading_floor  |  intel_hub     |  watchtower
+//   Row 1 (mid):     orca_pool      |  command_center |  agora
+//   Row 2 (south):   launchpad      |  nova_bank     |  burn_furnace
+//
 export const ZONE_3D: Record<string, { cx: number; cz: number; w: number; h: number }> = {
-  trading_floor:  { cx: -6,    cz: -4,    w: 4.2,  h: 3.2 },
-  intel_hub:      { cx:  0,    cz: -5,    w: 3.6,  h: 2.8 },
-  watchtower:     { cx:  6,    cz: -4.5,  w: 3.0,  h: 2.6 },
-  command_center: { cx:  0,    cz:  0,    w: 3.8,  h: 3.0 },
-  launchpad:      { cx: -6,    cz:  2,    w: 3.6,  h: 2.8 },
-  agora:          { cx:  6,    cz:  1,    w: 3.2,  h: 2.6 },
-  orca_pool:      { cx: -8.2,  cz: -2,    w: 2.0,  h: 1.6 },
-  burn_furnace:   { cx:  6,    cz:  4,    w: 2.6,  h: 2.0 },
-  nova_bank:      { cx: -8.2,  cz:  4,    w: 2.8,  h: 2.2 },
+  // Row 0 — north
+  trading_floor:  { cx: -9,   cz: -7,   w: 5.6,  h: 4.4 },
+  intel_hub:      { cx:  0,   cz: -7,   w: 5.0,  h: 4.0 },
+  watchtower:     { cx:  9,   cz: -7,   w: 4.6,  h: 4.0 },
+  // Row 1 — middle
+  orca_pool:      { cx: -9,   cz:  0,   w: 4.2,  h: 3.4 },
+  command_center: { cx:  0,   cz:  0,   w: 5.6,  h: 4.4 },
+  agora:          { cx:  9,   cz:  0,   w: 4.6,  h: 3.8 },
+  // Row 2 — south
+  launchpad:      { cx: -9,   cz:  7,   w: 5.0,  h: 4.0 },
+  nova_bank:      { cx:  0,   cz:  7,   w: 4.6,  h: 3.6 },
+  burn_furnace:   { cx:  9,   cz:  7,   w: 4.2,  h: 3.4 },
 };
 
 // ── Roads between zones (each segment = [start, end]) ────────────────────────
 const ROAD_SEGMENTS: Array<[THREE.Vector2, THREE.Vector2]> = [
-  // horizontal links
-  [new THREE.Vector2(-6, -4),   new THREE.Vector2(0, -4)],    // trading → intel
-  [new THREE.Vector2(0, -4.5),  new THREE.Vector2(6, -4.5)],  // intel → watchtower
-  [new THREE.Vector2(-6, 0),    new THREE.Vector2(0, 0)],     // launchpad row → command
-  [new THREE.Vector2(0, 0),     new THREE.Vector2(6, 0)],     // command → agora
-  [new THREE.Vector2(-8.2, -2), new THREE.Vector2(-6, -2)],   // orca → trading approach
-  [new THREE.Vector2(6, 2.5),   new THREE.Vector2(6, 4)],     // agora → burn (vertical)
-  // vertical links
-  [new THREE.Vector2(-6, -4),   new THREE.Vector2(-6, 2)],    // trading → launchpad
-  [new THREE.Vector2(0, -5),    new THREE.Vector2(0, 0)],     // intel → command
-  [new THREE.Vector2(6, -4.5),  new THREE.Vector2(6, 1)],     // watchtower → agora
+  // ── Horizontal links (same row) ──
+  [new THREE.Vector2(-6, -7),  new THREE.Vector2(-3, -7)],   // trading → intel
+  [new THREE.Vector2( 3, -7),  new THREE.Vector2( 6, -7)],   // intel → watchtower
+  [new THREE.Vector2(-6,  0),  new THREE.Vector2(-3,  0)],   // orca → command
+  [new THREE.Vector2( 3,  0),  new THREE.Vector2( 6,  0)],   // command → agora
+  [new THREE.Vector2(-6,  7),  new THREE.Vector2(-3,  7)],   // launchpad → nova_bank
+  [new THREE.Vector2( 3,  7),  new THREE.Vector2( 6,  7)],   // nova_bank → burn
+  // ── Vertical links (same column) ──
+  [new THREE.Vector2(-9, -4.5), new THREE.Vector2(-9, -2)],  // trading ↓ orca
+  [new THREE.Vector2(-9,  2),   new THREE.Vector2(-9,  4.5)],// orca ↓ launchpad
+  [new THREE.Vector2( 0, -4.5), new THREE.Vector2( 0, -2)],  // intel ↓ command
+  [new THREE.Vector2( 0,  2),   new THREE.Vector2( 0,  4.5)],// command ↓ nova_bank
+  [new THREE.Vector2( 9, -4.5), new THREE.Vector2( 9, -2)],  // watchtower ↓ agora
+  [new THREE.Vector2( 9,  2),   new THREE.Vector2( 9,  4.5)],// agora ↓ burn
 ];
 
 // ── Vehicle patrol paths (loop waypoints along roads) ─────────────────────────
 const ROAD_PATHS_3D: THREE.Vector3[][] = [
-  // Loop 1: trading → intel → command → launchpad
-  [new THREE.Vector3(-6, 0, -4), new THREE.Vector3(0, 0, -4), new THREE.Vector3(0, 0, 0), new THREE.Vector3(-6, 0, 2), new THREE.Vector3(-6, 0, -4)],
-  // Loop 2: intel → watchtower → agora → command
-  [new THREE.Vector3(0, 0, -4.5), new THREE.Vector3(6, 0, -4.5), new THREE.Vector3(6, 0, 1), new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -4.5)],
-  // Loop 3: orca → trading short
-  [new THREE.Vector3(-8.2, 0, -2), new THREE.Vector3(-6, 0, -2), new THREE.Vector3(-6, 0, -4), new THREE.Vector3(-8.2, 0, -2)],
-  // Loop 4: agora → burn short
-  [new THREE.Vector3(6, 0, 1), new THREE.Vector3(6, 0, 4), new THREE.Vector3(6, 0, 1)],
+  // Loop 1: trading → intel → command → orca → trading
+  [new THREE.Vector3(-9, 0, -7), new THREE.Vector3(0, 0, -7), new THREE.Vector3(0, 0, 0), new THREE.Vector3(-9, 0, 0), new THREE.Vector3(-9, 0, -7)],
+  // Loop 2: intel → watchtower → agora → command → intel
+  [new THREE.Vector3(0, 0, -7), new THREE.Vector3(9, 0, -7), new THREE.Vector3(9, 0, 0), new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -7)],
+  // Loop 3: orca → launchpad → nova_bank → command → orca
+  [new THREE.Vector3(-9, 0, 0), new THREE.Vector3(-9, 0, 7), new THREE.Vector3(0, 0, 7), new THREE.Vector3(0, 0, 0), new THREE.Vector3(-9, 0, 0)],
+  // Loop 4: agora → burn → nova_bank → command → agora
+  [new THREE.Vector3(9, 0, 0), new THREE.Vector3(9, 0, 7), new THREE.Vector3(0, 0, 7), new THREE.Vector3(0, 0, 0), new THREE.Vector3(9, 0, 0)],
 ];
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -1020,10 +1032,10 @@ export class World3D {
             }
           });
 
-          // Place at slot position — flush with ground
+          // Place at slot position — flush with ground, scaled to fit cell
           model.position.set(slot.x, GROUND_Y, slot.z);
           model.rotation.y = slot.rotation;
-          model.scale.setScalar(1.2);
+          model.scale.setScalar(0.7);
 
           this.threeScene.add(model);
 
@@ -1416,15 +1428,15 @@ export class World3D {
       if (!this.isDragging) return;
       const dx = e.clientX - this.lastMouse.x;
       const dy = e.clientY - this.lastMouse.y;
-      this.camTarget.x -= dx * this.panSpeed;
-      this.camTarget.z -= dy * this.panSpeed;
+      this.camTarget.x += dx * this.panSpeed;
+      this.camTarget.z += dy * this.panSpeed;
       this.lastMouse = { x: e.clientX, y: e.clientY };
     });
 
-    // Scroll to zoom (scroll down = zoom in, scroll up = zoom out)
+    // Scroll to zoom (scroll up = zoom in, scroll down = zoom out)
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
-      this.camOffset.multiplyScalar(e.deltaY > 0 ? 0.9 : 1.1);
+      this.camOffset.multiplyScalar(e.deltaY > 0 ? 1.1 : 0.9);
       this.camOffset.y = Math.max(5, Math.min(50, this.camOffset.y));
       this.camOffset.z = Math.max(3, Math.min(45, this.camOffset.z));
       this.updateCamera();
@@ -1448,8 +1460,8 @@ export class World3D {
       const t = e.touches[0];
       const dx = t.clientX - this.lastMouse.x;
       const dy = t.clientY - this.lastMouse.y;
-      this.camTarget.x -= dx * this.panSpeed;
-      this.camTarget.z -= dy * this.panSpeed;
+      this.camTarget.x += dx * this.panSpeed;
+      this.camTarget.z += dy * this.panSpeed;
       this.lastMouse = { x: t.clientX, y: t.clientY };
     });
   }
