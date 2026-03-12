@@ -165,6 +165,9 @@ export class World3D {
 
   private sceneReady = false;
 
+  // Agent idle roaming — each agent gets a countdown until next roam
+  private agentRoamTimers = new Map<string, number>();
+
   // Zone ambient particle systems
   private burnEmbers: { points: THREE.Points; velocities: Float32Array } | null = null;
   private launchSparks: { points: THREE.Points; velocities: Float32Array } | null = null;
@@ -1656,6 +1659,27 @@ export class World3D {
 
     // Update animation mixers
     for (const m of this.mixers) m.update(delta);
+
+    // Agent idle roaming — periodically walk to random point in home zone
+    for (const [agentId, agent] of this.agents) {
+      if (!agent.state.isWalking) {
+        const remaining = (this.agentRoamTimers.get(agentId) ?? 0) - delta;
+        if (remaining <= 0) {
+          // Pick random point within home zone
+          const def = AGENT_DEFS[agentId];
+          const z3d = def?.zone ? ZONE_3D[def.zone] : null;
+          if (z3d) {
+            const tx = z3d.cx + (Math.random() - 0.5) * (z3d.w * 0.6);
+            const tz = z3d.cz + (Math.random() - 0.5) * (z3d.h * 0.6);
+            agent.walkTo(tx, tz, this.collision);
+          }
+          // Next roam in 4-10 seconds
+          this.agentRoamTimers.set(agentId, 4 + Math.random() * 6);
+        } else {
+          this.agentRoamTimers.set(agentId, remaining);
+        }
+      }
+    }
 
     // Agent animations — idle sway/look-around + walking bob
     const time = performance.now() * 0.001;
