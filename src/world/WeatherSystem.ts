@@ -19,16 +19,16 @@ const WEATHER_CONFIGS: Record<WeatherState, WeatherConfig> = {
     sunIntensity: 2.5, sunColor: 0xfff8e8, rainRate: 0, windX: 0, windZ: 0,
   },
   overcast: {
-    fogDensity: 0.015, ambientIntensity: 1.1, ambientColor: 0x445566,
-    sunIntensity: 1.0, sunColor: 0xaabbcc, rainRate: 0, windX: 0.001, windZ: 0,
+    fogDensity: 0.010, ambientIntensity: 1.3, ambientColor: 0x556677,
+    sunIntensity: 1.5, sunColor: 0xbbccdd, rainRate: 0, windX: 0.001, windZ: 0,
   },
   rain: {
-    fogDensity: 0.022, ambientIntensity: 0.9, ambientColor: 0x334455,
-    sunIntensity: 0.6, sunColor: 0x8899aa, rainRate: 200, windX: 0.003, windZ: 0.001,
+    fogDensity: 0.018, ambientIntensity: 1.0, ambientColor: 0x445566,
+    sunIntensity: 0.8, sunColor: 0x99aacc, rainRate: 200, windX: 0.003, windZ: 0.001,
   },
   storm: {
-    fogDensity: 0.035, ambientIntensity: 0.75, ambientColor: 0x223344,
-    sunIntensity: 0.3, sunColor: 0x667788, rainRate: 600, windX: 0.008, windZ: 0.003,
+    fogDensity: 0.028, ambientIntensity: 0.85, ambientColor: 0x334455,
+    sunIntensity: 0.5, sunColor: 0x778899, rainRate: 600, windX: 0.008, windZ: 0.003,
   },
 };
 
@@ -174,9 +174,12 @@ export class WeatherSystem {
     const weatherSunFactor = lerpN(from.sunIntensity / 2.5, to.sunIntensity / 2.5);
     this._weatherSunMultiplier = Math.max(0.25, weatherSunFactor);
 
-    // Fog/sky colour — match so distant objects fade into sky, brighter at night
-    const skyFrom = this.currentWeather === 'clear' ? 0x1a1a2e : 0x141428;
-    const skyTo   = this.targetWeather  === 'clear' ? 0x1a1a2e : 0x141428;
+    // Fog/sky colour — per-weather-type sky tint (brighter for mild weather)
+    const SKY_TINTS: Record<WeatherState, number> = {
+      clear: 0x1a1a2e, overcast: 0x181828, rain: 0x151525, storm: 0x111120,
+    };
+    const skyFrom = SKY_TINTS[this.currentWeather];
+    const skyTo   = SKY_TINTS[this.targetWeather];
     const skyColor = new THREE.Color(skyFrom).lerp(new THREE.Color(skyTo), t);
     this.fog.color.copy(skyColor);
     if (this.scene.background instanceof THREE.Color) {
@@ -317,9 +320,10 @@ export class WeatherSystem {
       botB = THREE.MathUtils.lerp(0.60, 0.12, t);
     }
 
-    // Weather overcast/storm darkens the sky
+    // Weather darkens the sky gradually based on fog density
     const wCfg = WEATHER_CONFIGS[this.currentWeather];
-    const darkFactor = wCfg.fogDensity > 0.02 ? 0.4 : 1.0;
+    // clear=0.008 → 1.0, overcast=0.010 → 0.92, rain=0.018 → 0.72, storm=0.028 → 0.50
+    const darkFactor = Math.max(0.45, 1.0 - (wCfg.fogDensity - 0.008) * 25);
 
     (skyUniforms.topColor.value as THREE.Color).setRGB(topR * darkFactor, topG * darkFactor, topB * darkFactor);
     (skyUniforms.bottomColor.value as THREE.Color).setRGB(botR * darkFactor, botG * darkFactor, botB * darkFactor);
